@@ -48,6 +48,16 @@ Map.prototype.mapUpdate = function(callback) {
         this[k] = callback(k.substring(1), this[k]);
     }
 }
+Map.prototype.clone = function() {
+    var result = new Map
+    for (var k in this) {
+        if (!this.hasOwnProperty(k)) {
+            continue;
+        }
+        result[k] = this[k]
+    }
+    return result
+}
 
 // Specialized methods
 Map.prototype.push = function(key, val) {

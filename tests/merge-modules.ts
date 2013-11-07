@@ -1,10 +1,6 @@
 declare module A {
-	class C {
-		x: number;
-	}
+	export var x : number;
 }
 declare module A {
-	class D {
-		x: number;
-	}
+	export var y : string;
 }
