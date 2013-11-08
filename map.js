@@ -58,6 +58,15 @@ Map.prototype.clone = function() {
     }
     return result
 }
+Map.prototype.size = function() {
+    var x = 0
+    for (var k in this) {
+        if (!this.hasOwnProperty(k))
+            continue;
+        x++;
+    }
+    return x;
+}
 
 // Specialized methods
 Map.prototype.push = function(key, val) {

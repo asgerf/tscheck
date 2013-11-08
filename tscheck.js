@@ -13,7 +13,11 @@ var text = fs.readFileSync(file, 'utf8')
 var ast = TypeScript.parse(text)
 
 function getLine(node) {
-    return ast.lineMap.getLineNumberFromPosition(node.minChar)
+    return ast.lineMap.getLineNumberFromPosition(node.minChar) // FIXME: doesn't seem to work
+}
+var current_node = null;
+function TypeError(msg) {
+	return new Error(msg + " (line " + (current_node && getLine(current_node)) + ")")
 }
 
 
@@ -21,33 +25,10 @@ function getLine(node) {
 // Scope Chains
 // --------------------
 
-function TTopLevelScope(obj) {
-	this.obj = obj;
-}
-TTopLevelScope.prototype.lookupType = function(x) {
-	console.log("Lookup up " + x + " in top-level")
-	return this.obj.types.get(x)
-}
-TTopLevelScope.prototype.lookupTypeParam = function(x) {
-	return null;
-}
-
 // TModuleScope contains all symbols exported from the merged module with the given qualified name
-function TModuleScope(localName, parent) {
-    this.localName = localName;
+function TModuleScope(qname, parent) {
+    this.qname = qname;
     this.parent = parent;
-    this.obj = null;
-}
-TModuleScope.prototype.lookupType = function(x) {
-	if (!this.obj) {
-		this.obj = this.parent.lookupType(this.localName)
-		if (!this.obj)
-			throw new Error("Module " + this.localName + " was never defined")
-	}
-	return this.obj.types.get(x) || this.parent && this.parent.lookupType(x)
-}
-TModuleScope.prototype.lookupTypeParam = function(x) {
-	return this.parent && this.parent.lookupTypeParam(x);
 }
 
 // TTypeParameterScope contains type parameters. These must be resolved early (see merging phase)
@@ -55,33 +36,14 @@ function TTypeParameterScope(parent) {
     this.env = new Map
     this.parent = parent;
 }
-TTypeParameterScope.prototype.lookupType = function(x) {
-	return this.parent.lookupType(x);
-}
-TTypeParameterScope.prototype.lookupTypeParam = function(x) {
-	return this.env.get(x) || this.parent.lookupTypeParam(x)
-}
 
 // TLocalScope contains non-exported declarations from a module block
 function TLocalScope(parent) {
 	this.env = new Map
 	this.parent = parent;
 }
-TLocalScope.prototype.lookupType = function(x) {
-	return this.env.get(x) || this.parent.lookupType(x)
-}
-TLocalScope.prototype.lookupTypeParam = function(x) {
-	return this.parent.lookupTypeParam(x);
-}
 
-
-var current_scope = null;
-
-// Register the given TLocalScope, so that the merging phase can see it
-var local_scopes = []
-function registerLocalScope(scope) {
-	local_scopes.push(scope)
-}
+var current_scope = new TModuleScope('', null);
 
 // --------------------
 //  Types
@@ -146,6 +108,11 @@ TEnum.prototype.toString = function() {
 	return this.qname
 }
 
+// String constant type.
+function TString(value) {
+	this.value = value;
+}
+
 // Object type.
 function TObject(qname) {
 	this.qname = qname;
@@ -166,7 +133,7 @@ TObject.prototype.getMember = function(name) {
 TObject.prototype.setMember = function(name,typ) {
 	var existing = this.properties.get(name)
 	if (existing && !compatibleTypes(typ,existing))
-		throw new Error("Duplicate identifier " + name);
+		throw new TypeError("Duplicate identifier " + name);
 	this.properties.put(name, typ)
 }
 TObject.prototype.toString = function() {
@@ -199,6 +166,7 @@ function qualify(host, name) {
 
 // TODO: indexing members
 // TODO: optional properties
+// TODO: static properties
 
 // Because some types can be extended, we must be careful to distinguish structural types
 // from nominal types. For example, parseModule may return a structural type corresponding
@@ -213,56 +181,42 @@ function qualify(host, name) {
 // available until then.
 
 function addModuleMember(member, typ) {
+	current_node = member;
 	var topLevel = typ.qname === '';
     if (member instanceof TypeScript.FunctionDeclaration) {
-    	if (!topLevel && !TypeScript.hasFlag(member.getFunctionFlags(), TypeScript.FunctionFlags.Exported)) {
-    		return; // ignore non-exported function
+    	var obj = typ.getMember(member.name.text())
+    	if (obj instanceof TObject) {
+    		obj.calls.push(parseFunctionType(member))
+    	} else {
+    		throw new TypeError(member.name.text() + " is not a function")
     	}
-        typ.setMember(member.name.text(), parseFunctionType(member))
     }
     else if (member instanceof TypeScript.VariableStatement) {
         member.declaration.declarators.members.forEach(function(decl) {
-        	if (!topLevel && !TypeScript.hasFlag(decl.getVarFlags(), TypeScript.VariableFlags.Exported)) {
-	    		return; // ignore non-exported variable
-	    	}
             typ.setMember(decl.id.text(), parseType(decl.typeExpr))
         })
     }
     else if (member instanceof TypeScript.ModuleDeclaration) {
-    	var isExported = topLevel || TypeScript.hasFlag(member.getModuleFlags(), TypeScript.ModuleFlags.Exported);
     	var name = member.name.text()
     	if (member.isEnum()) { // enums are ModuleDeclarations in the AST, but they are semantically quite different
-    		if (!isExported)
-    			return; // ignore non-exported enum
     		var enumObj = parseEnum(member, typ.qname)
     		typ.types.push(name, enumObj.enum)
     		typ.setMember(name, enumObj.object)
     	} else {
     		// TODO: external module (ie. quoted name)
-    		if (isExported) {
-    			var submodule = parseModule(member, typ.qname)
-    			typ.types.push(name, submodule)
-    			if (typ.qname !== null) { // if publicly visible
-    				typ.setMember(name, new TQualifiedReference(submodule.qname))
-    			}
-    		} else {
-    			var submodule = parseModule(member, null)
-    			current_scope.env.push(name, submodule)
-    		}
+			var submodule = parseModule(member, typ.qname)
+			typ.types.push(name, submodule)
+			if (typ.qname !== null) { // if publicly visible
+				typ.setMember(name, new TQualifiedReference(submodule.qname))
+			}
     	}
     }
     else if (member instanceof TypeScript.ClassDeclaration) {
-    	if (!topLevel && !TypeScript.hasFlag(member.getVarFlags(), TypeScript.VariableFlags.Exported)) {
-    		return; // ignore non-exported class
-    	}
         var clazz = parseClass(member, typ.qname)
         typ.setMember(member.name.text(), clazz.constructorType)
         typ.types.push(member.name.text(), clazz.instanceType)
     }
     else if (member instanceof TypeScript.InterfaceDeclaration) {
-    	if (!topLevel && !TypeScript.hasFlag(member.getVarFlags(), TypeScript.VariableFlags.Exported)) {
-    		return; // ignore non-exported interface
-    	}
         var t = parseInterface(member, typ.qname)
         typ.types.push(member.name.text(), t)
     }
@@ -284,18 +238,20 @@ function addModuleMember(member, typ) {
     	// Maybe we need these for modular analysis?
     }
     else {
-    	throw new Error("Unexpected member in module " + typ.qname + ": " + member.constructor.name)
+    	throw new TypeError("Unexpected member in module " + typ.qname + ": " + member.constructor.name)
     }
 }
 
 function parseModule(node, host) {
+	current_node = node;
+	if (!node.isDeclaration())
+		throw new TypeError("Non-ambient module declaration " + node.name.text() + " on line " + getLine(node))
 	var name = node.name.text()
     var qname = qualify(host, node.name.text()) // todo: quoted names
     var typ = new TObject(qname)
     var namespace = new Map
-    current_scope = new TModuleScope(name, current_scope)
-    current_scope = new TLocalScope(current_scope)
-    registerLocalScope(current_scope)
+    current_scope = new TModuleScope(qname, current_scope)
+    current_scope = new TLocalScope(current_scope, getLine(node))
     node.members.members.forEach(function (member) {
         addModuleMember(member, typ)
     })
@@ -305,6 +261,7 @@ function parseModule(node, host) {
 }
 
 function parseEnum(node, host) {
+	current_node = node;
 	var qname = qualify(host, node.name.text())
 	var enumType = new TEnum(qname)
 	var objectType = new TObject(null)
@@ -315,7 +272,7 @@ function parseEnum(node, host) {
 				objectType.setMember(decl.id.text(), selfTypeRef)
 			})
 		} else {
-			throw new Error("Unexpected enum member: " + member.constructor.name)
+			throw new TypeError("Unexpected enum member: " + member.constructor.name)
 		}
 	})
 	return {
@@ -325,16 +282,16 @@ function parseEnum(node, host) {
 }
 
 function parseTopLevel(node) {
+	current_node = node;
     var t = new TObject('')
-    current_scope = new TTopLevelScope(t)
     node.moduleElements.members.forEach(function (member) {
         addModuleMember(member, t)
     })
-    current_scope = null
     return t
 }
 
 function parseClass(node, host) {
+	current_node = node;
 	var name = node.name.text()
     var qname = qualify(host, name)
     var instanceType = new TObject(qname)
@@ -375,7 +332,7 @@ function parseClass(node, host) {
             }
         }
         else if (member instanceof TypeScript.VariableDeclarator) {
-            instanceType.setMember(member.id.text(), parseType(member.typeExpr))
+            instanceType.setMember(member.id.text(), member.typeExpr ? parseType(member.typeExpr) : TAny)
         }
     })
     current_scope = current_scope.parent // restore previous scope
@@ -385,6 +342,7 @@ function parseClass(node, host) {
     }
 }
 function parseInterface(node, host) {
+	current_node = node;
 	var qname = qualify(host, node.name.text());
     var typ = new TObject(qname)
     current_scope = new TTypeParameterScope(current_scope)
@@ -406,14 +364,31 @@ function parseInterface(node, host) {
             typ.setMember(member.id.text(), t)
         }
         else {
-            throw new Error("Unexpected member " + member.constructor.name + " in interface")
+            throw new TypeError("Unexpected member " + member.constructor.name + " in interface")
         }
     })
     current_scope = current_scope.parent
     return typ
 }
 
+function lookupTypeParameterDirect(scope, name) {
+	if (scope instanceof TTypeParameterScope)
+		return scope.env.get(name)
+	else
+		return null;
+}
+function lookupTypeParameter(scope, name) {
+	while (scope !== null) {
+		var t = lookupTypeParameterDirect(scope,name)
+		if (t)
+			return t;
+		scope = scope.parent
+	}
+	return null;
+}
+
 function parseType(node) {
+	current_node = node;
     if (node instanceof TypeScript.GenericType) {
         var t = parseType(node.name)
         var targs = node.typeArguments.members.map(parseType)
@@ -428,7 +403,7 @@ function parseType(node) {
     }
     else if (node instanceof TypeScript.Identifier) {
     	// try to resolve early (type parameters must be resolved before merging)
-    	var t = current_scope.lookupTypeParam(node.text())
+    	var t = lookupTypeParameter(current_scope, node.text())
     	if (t) {
     		return t;
     	}
@@ -439,17 +414,23 @@ function parseType(node) {
         return parseInterface(node)
     } 
     else if (node instanceof TypeScript.FunctionDeclaration) {
-        return parseFunctionType(node)
+    	var t = new TObject(null);
+        t.calls.push(parseFunctionType(node))
+        return t;
     }
     else if (node instanceof TypeScript.BinaryExpression) {
     	return new TMember(parseType(node.operand1), node.operand2.text())
     }
+    else if (node instanceof TypeScript.StringLiteral) {
+    	return new TString(node.text())
+    }
     else {
-        throw new Error("Unexpected type: " + node.constructor.name)
+        throw new TypeError("Unexpected type: " + node.constructor.name)
     }
 }
 
 function parseParameter(node) {
+	current_node = node;
     return {
         optional: node.isOptional,
         name: node.id.text(),
@@ -458,6 +439,7 @@ function parseParameter(node) {
 }
     
 function parseTypeParameter(node) {
+	current_node = node;
     return {
         name: node.name.text(),
         constraint: node.constraint ? parseType(node.constraint) : null
@@ -465,6 +447,7 @@ function parseTypeParameter(node) {
 }
 
 function parseConstructorFunction(node, selfTypeRef, instanceTypeParams) {
+	current_node = node;
     // convert constructor to generic function
     // for example: class Foo<T> { constructor<U>(x:T, y:U) }
     // the constructor type is: <T,U>(x:T, y:U) => Foo<T>
@@ -492,6 +475,7 @@ function parseConstructorFunction(node, selfTypeRef, instanceTypeParams) {
 }
 
 function parseFunctionType(node) {
+	current_node = node;
 	current_scope = new TTypeParameterScope(current_scope)
 	var typeParams = []
 	node.typeArguments && node.typeArguments.members.forEach(function(tp) {
@@ -520,13 +504,28 @@ var global_type = parseTopLevel(ast)
 //  Merging types
 // --------------------
 
+function isOnlyFunction(typ) {
+	return typ instanceof TObject && 
+		   typ.qname === null && 
+		   typ.properties.size() === 0 &&
+		   typ.calls.length > 0 &&
+		   typ.typeParameters.length === 0 &&
+		   typ.supers.length === 0;
+}
+
 function mergePropertyInto(typ, other) {
 	if (typ instanceof TQualifiedReference && other instanceof TQualifiedReference) {
 		if (typ.qname === other.qname) {
 			return; // ok
 		}
 	}
-	throw new Error("Incompatible types: " + typ + " and " + other)
+	else if (isOnlyFunction(typ) && isOnlyFunction(other)) {
+		other.calls.forEach(function(call) {
+			typ.calls.push(call)
+		})
+		return; // ok
+	}
+	throw new TypeError("Incompatible types: " + typ + " and " + other)
 }
 
 function renameTypeParametersInParam(param, mapping) {
@@ -601,14 +600,13 @@ function renameTypeParametersInType(typ, mapping) {
 }
 
 function mergeInto(typ, other) {
-	console.log("Merging " + typ.qname)
     if (!(typ instanceof TObject) || !(other instanceof TObject)) {
-        throw new Error("Incompatible types for " + typ.qname + ": " + typ.constructor.name + " and " + other.constructor.name)
+        throw new TypeError("Incompatible types for " + typ.qname + ": " + typ.constructor.name + " and " + other.constructor.name)
     }
     if (typ === other)
         return;
     if (typ.typeParameters.length !== other.typeParameters.length)
-    	throw new Error("Unequal number of type parameters for partial definitions of " + typ.qname)
+    	throw new TypeError("Unequal number of type parameters for partial definitions of " + typ.qname)
     var mapping = new Map
     for (var i=0; i<typ.typeParameters.length; i++) {
     	mapping.put(other.typeParameters[i].name, typ.typeParameters[i].name)
@@ -616,7 +614,12 @@ function mergeInto(typ, other) {
     // rename type parameters to the two types agree on their names
     other = renameTypeParametersInType(other, mapping)
     other.properties.forEach(function(name,otherT) {
-    	typ.setMember(name, otherT)
+    	var existing = typ.properties.get(name)
+    	if (!existing) {
+    		typ.setMember(name, otherT)
+    	} else {
+    		mergePropertyInto(existing, otherT)
+    	}
     })
     other.types.forEach(function(name,otherT) {
         var typT = typ.types.get(name)
@@ -625,6 +628,9 @@ function mergeInto(typ, other) {
         } else if (typT !== otherT) {
             typ.types.put(name, otherT)
         }
+    })
+    other.calls.forEach(function(call) {
+    	typ.calls.push(call)
     })
 }
 function mergeObjectTypes(x) {
@@ -649,84 +655,131 @@ function mergeScopeTypes(x) {
 }
 
 mergeObjectTypes(global_type)
-local_scopes.forEach(mergeScopeTypes)
 
+
+// ----------------------------------
+//  Type environment
+// ----------------------------------
+
+
+var type_env = new Map
+function buildEnv(type) {
+	if (type instanceof TObject) {
+		type_env.put(type.qname, type)
+		type.types.forEach(function(name,typ) {
+			type.types.put(name, buildEnv(typ))
+		})
+		return new TQualifiedReference(type.qname)	
+	}
+	else if (type instanceof TEnum) {
+		type_env.put(type.qname, type)
+		return new TQualifiedReference(type.qname)
+	}
+	else {
+		return type;
+	}
+}
+buildEnv(global_type)
 
 
 // ----------------------------------
 //  Name resolution
 // ----------------------------------
 
-function getCanonicalType(qname) {
+function lookupQualifiedType(qname) {
 	var t = type_env.get(qname)
 	if (!t)
-		throw new Error("Unresolved type: " + qname)
+		throw new TypeError("Unresolved type: " + qname)
 	return t;
 }
+
+function lookupInScopeDirect(scope, name) {
+	if (scope instanceof TModuleScope) {
+		var module = lookupQualifiedType(scope.qname)
+		return module.types.get(name)
+	}
+	else if (scope instanceof TLocalScope) {
+		return scope.env.get(name)
+ 	}
+ 	else if (scope instanceof TTypeParameterScope) {
+ 		return null;
+ 	}
+ 	else {
+ 		throw new Error("Unexpected scope type: " + scope)
+ 	}
+}
+function lookupInScope(scope, name) {
+	while (scope !== null) {
+		var t = lookupInScopeDirect(scope,name)
+		if (t)
+			return t;
+		scope = scope.parent
+	}
+	return null;
+}
+
 function lookupInType(type, name) {
 	var obj = resolveToObject(type)
 	var t = obj.types.get(name)
 	if (!t)
-		throw new Error(obj.qname + " does not have a type " + name)
+		throw new TypeError(obj.qname + " does not have a type " + name)
 	return t;
-}
-
-function lookupCanonicalType(x) {
-	if (x instanceof TQualifiedReference)
-		return type_env.get(x.qname)
-	else if (typeof x === 'string')
-		return type_env.get(x)
-	else
-		throw new Error("Not a qualified name: " + x)
 }
 
 function resolveToObject(x) {
 	x = resolveType(x)
-	if (x instanceof TReference)
-		x = x.resolution
+	if (x instanceof TQualifiedReference)
+		x = lookupQualifiedType(x)
 	if (x instanceof TObject)
 		return x;
-	throw new Error("Not an object: " + x);
+	throw new TypeError("Not an object: " + x);
 }
 
 // converts TReference and TMember to TQualifiedReference
 function resolveType(x) {
-	// TODO: clean this up. resolveType currently acts as identity function, but with side-effects
 	if (x instanceof TReference) {
 		if (x.resolution)
 			return x.resolution
 		if (x.resolving)
-			throw new Error("Cyclic reference involving " + x)
+			throw new TypeError("Cyclic reference involving " + x)
 		x.resolving = true
-		// var t = resolveType(lookupInScope(x.scope, x.name))
-		var t = x.scope.lookupType(x.name)
+		var t = lookupInScope(x.scope, x.name)
 		if (!t) {
 			t = new TQualifiedReference(x.name) // XXX: for now, assume this is global type
-			// throw new Error("Unresolved type: " + x.name)
+			// throw new TypeError("Unresolved type: " + x.name)
 		}
 		t = resolveType(t)
 		x.resolution = t;
-		return x;
+		return t;
 	} else if (x instanceof TMember) {
 		if (x.resolution)
 			return x.resolution
 		if (x.resolving)
-			throw new Error("Cyclic reference involving " + x)
+			throw new TypeError("Cyclic reference involving " + x)
 		x.resolving = true
 		var base = resolveType(x.base)
 		var t = resolveType(lookupInType(base, x.name))
 		x.resolution = t
-		return x;
+		return t;
 	} else if (x instanceof TObject) {
-		return x;
+		return resolveObject(x);
 	} else if (x instanceof TQualifiedReference) {
 		return x;
 	} else if (x instanceof TTypeParam) {
-		return x;
+		return new TTypeParam(x.name, x.constraint && resolveType(x.constraint))
 	} else if (x instanceof TGeneric) {
+		return new TGeneric(resolveType(x.base), x.args.map(resolveType))
+	} else if (x instanceof TString) {
+		return x;
+	} else if (x === TAny) {
 		return x;
 	}
-	throw new Error("Cannot canonicalize reference to " + (x && x.constructor.name + ': ' + x))
+	var msg;
+	if (x.constructor.name === 'Object')
+		msg = util.inspect(x)
+	else
+		msg = '' + x;
+	throw new TypeError("Cannot canonicalize reference to " + (x && x.constructor.name + ': ' + msg))
 }
 
 function resolveCall(call) {
@@ -756,6 +809,8 @@ function resolveParameter(param) {
 
 function resolveObject(type) {
 	type.properties.mapUpdate(function(name,typ) {
+		if (typ.constructor.name == 'Object')
+			throw new TypeError(type.qname + "." + name + " is not a type: " + util.inspect(typ))
 		return resolveType(typ)
 	})
 	type.types.mapUpdate(function(name,typ) {
@@ -773,16 +828,20 @@ function resolve(x) {
 	return x;
 }
 
-// type_env.forEach(function(name,type) {
-	// resolve(type)
-// })
+type_env.forEach(function(name,type) {
+	resolve(type)
+})
 resolveObject(global_type)
+
+// --------------------------------------------
+//  	Dump (for debugging)
+// --------------------------------------------
 
 TReference.prototype.inspect = function() {
 	resolveType(this)
 	if (this.resolution.qname)
 		return this.resolution.qname;
-	return this.name;
+	return  this.name;
 }
 TMember.prototype.inspect = function() {
 	resolveType(this)
@@ -791,30 +850,6 @@ TMember.prototype.inspect = function() {
 	return this.base + '.' + this.name
 }
 // console.log(util.inspect(global_type, {depth:null}))
-
-// ----------------------------------
-//  Type environment
-// ----------------------------------
-
-
-var type_env = new Map
-function buildEnv(type) {
-	if (type instanceof TObject) {
-		type_env.put(type.qname, type)
-		type.types.forEach(function(name,typ) {
-			type.types.put(name, buildEnv(typ))
-		})
-		return new TQualifiedReference(type.qname)	
-	}
-	else if (type instanceof TEnum) {
-		type_env.put(type.qname, type)
-		return new TQualifiedReference(type.qname)
-	}
-	else {
-		return type;
-	}
-}
-buildEnv(global_type)
 
 console.log(util.inspect(type_env, {depth:null}))
 
