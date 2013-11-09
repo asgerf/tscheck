@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 var TypeScript = require('./ts')
 var fs = require('fs')
 var program = require('commander')
@@ -176,7 +177,6 @@ function qualify(host, name) {
 }
 
 // TODO: optional properties
-// TODO: static properties
 // TODO: external module references (quoted names) and export assignment
 // TODO: typeof operator
 // TODO: built-in types
@@ -316,11 +316,14 @@ function parseClass(node, constructorType, host) {
     var instanceRef = new TQualifiedReference(qname)
     
     // put type parameters into scope
-    current_scope = new TTypeParameterScope(current_scope)
+    var original_scope = current_scope // scope to restore before returning
+    var static_scope = current_scope // the scope used by static members (cannot see type parameters)
+    var instance_scope = new TTypeParameterScope(current_scope)
+    current_scope = instance_scope
     var typeParams = []
     node.typeParameters && node.typeParameters.members.forEach(function (tp) {
     	var name = tp.name.text()
-    	current_scope.env.put(name, new TTypeParam(name))
+    	instance_scope.env.put(name, new TTypeParam(name))
     	typeParams.push(parseTypeParameter(tp))
     })
     instanceType.typeParameters = typeParams
@@ -336,23 +339,22 @@ function parseClass(node, constructorType, host) {
         instanceType.supers.push(parseType(ext))
     })
     node.members.members.forEach(function(member) {
+    	current_scope = member.isStatic() ? static_scope : instance_scope;
         if (member instanceof TypeScript.FunctionDeclaration) {
             if (member.isConstructor) { // syntax: constructor()..
                 constructorType.calls.push(parseConstructorFunction(member, selfType, typeParams))
             } else {
-                var typ;
-                if (member.name)
-                    typ = instanceType.getMember(member.name.text())
-                else
-                    typ = instanceType;
+            	var container = member.isStatic() ? constructorType : instanceType;
+            	var typ = member.name ? container.getMember(member.name.text()) : container;
                 typ.calls.push(parseFunctionType(member))
             }
         }
         else if (member instanceof TypeScript.VariableDeclarator) {
-            instanceType.setMember(member.id.text(), member.typeExpr ? parseType(member.typeExpr) : TAny)
+        	var typ = member.isStatic() ? constructorType : instanceType;
+            typ.setMember(member.id.text(), member.typeExpr ? parseType(member.typeExpr) : TAny)
         }
     })
-    current_scope = current_scope.parent // restore previous scope
+    current_scope = original_scope // restore previous scope
     return {
         constructorType: constructorType,
         instanceType: instanceType
