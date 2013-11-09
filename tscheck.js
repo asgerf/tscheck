@@ -175,7 +175,6 @@ function qualify(host, name) {
 		return host + '.' + name;
 }
 
-// TODO: indexing members
 // TODO: optional properties
 // TODO: static properties
 // TODO: external module references (quoted names) and export assignment
@@ -374,7 +373,7 @@ function parseInterface(node, host) {
     })
     node.members.members.forEach(function(member) {
         if (member instanceof TypeScript.FunctionDeclaration) {
-            var t = member.name ? typ.getMember(member.name.text()) : typ;
+            var t = member.name && !member.isIndexerMember() ? typ.getMember(member.name.text()) : typ;
             t.calls.push(parseFunctionType(member))
         }
         else if (member instanceof TypeScript.VariableDeclarator) {
@@ -484,6 +483,7 @@ function parseConstructorFunction(node, selfTypeRef, instanceTypeParams) {
 	var t = {
 		'new': true,
 		variadic: node.variableArgList,
+		indexer: false,
 		typeParameters: typeParams,
 		parameters: node.arguments.members.map(parseParameter),
         returnType: selfTypeRef
@@ -504,6 +504,7 @@ function parseFunctionType(node) {
     var result = {
         'new': node.isConstructMember(),
         variadic: node.variableArgList,
+        indexer: node.isIndexerMember(),
         typeParameters: typeParams,
         parameters: node.arguments.members.map(parseParameter),
         returnType: node.returnTypeAnnotation ? parseType(node.returnTypeAnnotation) : TAny
@@ -580,6 +581,7 @@ function renameTypeParametersInCall(call, mapping) {
 	return {
 		'new': call.new,
 		variadic: call.variadic,
+		indexer: call.indexer,
 		typeParameters: typeParams,
 		parameters: call.parameters.map(function(param) {
 			return renameTypeParametersInParam(param, mapping)
@@ -833,6 +835,7 @@ function resolveCall(call) {
 	return {
 		'new': call.new,
 		variadic: call.variadic,
+		indexer: call.indexer,
 		typeParameters: call.typeParameters.map(resolveTypeParameter),
 		parameters: call.parameters.map(resolveParameter),
 		returnType: resolveType(call.returnType)
