@@ -176,6 +176,7 @@ function qualify(host, name) {
 		return host + '.' + name;
 }
 
+// TODO: merge properties into modules
 // TODO: optional properties
 // TODO: external module references (quoted names) and export assignment
 // TODO: typeof operator
@@ -872,6 +873,9 @@ function resolveObject(type) {
 	})
 	type.types.mapUpdate(function(name,typ) {
 		return resolveType(typ);
+	})
+	type.modules.forEach(function (name,typ) {
+		resolveObject(typ)
 	})
 	type.supers = type.supers.map(resolveType)
 	type.calls = type.calls.map(resolveCall)
