@@ -3,7 +3,6 @@ interface IndexingNumber {
 }
 interface IndexingString {
 	[x:string] : A;
-	__item: B;
 }
 interface A {
 	x: number;

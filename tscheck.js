@@ -1081,8 +1081,8 @@ function outputTypeParameter(tp) {
 function findIndexer(calls, typeName) {
     for (var i=0; i<calls.length; i++) {
         var call = calls[i];
-        if (call.indexer && call.parameters[0] instanceof TBuiltin && call.parameters[0].name === typeName) {
-            return call;
+        if (call.indexer && call.parameters[0].type instanceof TBuiltin && call.parameters[0].type.name === typeName) {
+            return outputType(call.returnType);
         }
     }
     return null;
