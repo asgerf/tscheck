@@ -84,6 +84,15 @@ TMember.prototype.toString = function() {
 	return this.base + '.' + this.name
 }
 
+// Type on form "typeof E" where E is a TypeScript expression on form A.B.C...
+function TTypeQuery(names, scope) {
+    this.names = names; // string array
+    this.scope = scope;
+}
+TTypeQuery.prototype.toString = function() {
+    return "typeof " + this.names.join('.')
+}
+
 // Reference to a type parameter.
 function TTypeParam(name) {
     this.name = name;
@@ -177,18 +186,18 @@ TAny.toString = function() { return 'any' }
 // -----------------------------------
 
 function qualify(host, name) {
-	if (host === null)
+    if (host === '')
+        return name;
+	else if (!host)
 		return null;
-	else if (host === '')
-		return name;
 	else
 		return host + '.' + name;
 }
 
 // TODO: merge properties into modules after name resolution
 // TODO: external module references (quoted names) and export assignment
-// TODO: typeof operator
 // TODO: built-in types
+// TODO: generate output
 
 // Because some types can be extended, we must be careful to distinguish structural types
 // from nominal types. For example, parseModule may return a structural type corresponding
@@ -268,12 +277,8 @@ function addModuleMember(member, moduleObject, qname) {
 }
 
 function parseModule(node, moduleObject, qname) {
+    moduleObject.qname = 'module:' + qname;
 	current_node = node;
-	// if (!node.isDeclaration())
-	// 	throw new TypeError("Non-ambient module declaration " + node.name.text() + " on line " + getLine(node))
-	// var name = node.name.text()
- //    var qname = qualify(qname, node.name.text()) // todo: quoted names
- //    var moduleObject = new TObject(qname)
     current_scope = new TModuleScope(moduleObject, current_scope)
     current_scope = new TLocalScope(current_scope)
     node.members.members.forEach(function (member) {
@@ -417,6 +422,22 @@ function lookupTypeParameter(scope, name) {
 	return null;
 }
 
+function parseNameList(node) {
+    if (node instanceof TypeScript.TypeReference)
+        node = node.term;
+    if (node instanceof TypeScript.Identifier) {
+        return [node.text()]
+    }
+    else if (node.nodeType() == TypeScript.NodeType.MemberAccessExpression) {
+        var names = parseNameList(node.operand1)
+        names.push(node.operand2.text())
+        return names;
+    }
+    else {
+        throw new TypeError("Not a name list: " + node.constructor.name + ': ' + util.inspect(node))
+    }
+}
+
 function parseType(node) {
 	current_node = node;
     if (node instanceof TypeScript.GenericType) {
@@ -454,8 +475,11 @@ function parseType(node) {
     else if (node instanceof TypeScript.StringLiteral) {
     	return new TString(node.text())
     }
+    else if (node instanceof TypeScript.TypeQuery) {
+        return new TTypeQuery(parseNameList(node.name), current_scope)
+    }
     else {
-        throw new TypeError("Unexpected type: " + node.constructor.name)
+        throw new TypeError("Unexpected type: " + (node && node.constructor.name))
     }
 }
 
@@ -736,10 +760,19 @@ function buildEnv(type) {
 global_type.qname = '<global>';
 buildEnv(global_type)
 
+var next_synthetic = 1
+function synthesizeName(obj)  {
+    if (obj.qname === null) {
+        obj.qname = '#' + (next_synthetic++);
+        type_env.put(obj.qname, obj)
+    }
+    return new TQualifiedReference(obj.qname)
+}
 
-// ----------------------------------
-//  Name resolution
-// ----------------------------------
+
+// ----------------------------------------------------------
+//  Name resolution (and resolution of TTypeQuery)
+// ----------------------------------------------------------
 
 function lookupQualifiedType(qname) {
 	var t = type_env.get(qname)
@@ -796,6 +829,31 @@ function lookupInType(type, name, isModule) {
 	return t;
 }
 
+function lookupPrtyInScopeDirect(scope, name) {
+    if (scope instanceof TModuleScope) {
+        var obj = scope.obj
+        var t = obj.modules.get(name)
+        if (t)
+            return t;
+        var prty = obj.properties.get(name)
+        if (prty)
+            return prty.type;
+        return null;
+    }
+    else {
+        return null;
+    }
+}
+function lookupPrtyInScope(scope, name) {
+    while (scope !== null) {
+        var t = lookupPrtyInScopeDirect(scope,name)
+        if (t)
+            return t;
+        scope = scope.parent
+    }
+    return null
+}
+
 // Resolves a TReference or TMember to a TQualifiedReference
 function resolveReference(x, isModule) {
 	if (x instanceof TReference) {
@@ -822,6 +880,29 @@ function resolveReference(x, isModule) {
 		var t = resolveReference(lookupInType(base, x.name, isModule), isModule)
 		x.resolution = t
 		return t;
+    } else if (x instanceof TTypeQuery) {
+        if (x.resolution)
+            return x.resolution;
+        if (x.resolving)
+            throw new TypeError("Cyclic reference involving " + x)
+        x.resolving = true
+        var t = lookupPrtyInScope(x.scope, x.names[0])
+        if (!t)
+            throw new TypeError("Name not found: " + x.names[0])
+        t = resolveReference(t)
+        for (var i=1; i<x.names.length; i++) {
+            var prty = t.properties.get(x.names[i])
+            var module = t.modules.get(x.names[i])
+            var t = prty ? prty.type : module;
+            if (!t)
+                throw new TypeError("Name not found: " + x.names.slice(0,i).join('.'))
+            t = resolveReference(t)
+        }
+        if (t instanceof TObject && !t.qname) {
+            t = synthesizeName(t) // don't create aliasing
+        }
+        x.resolution = t;
+        return t;
 	} else {
 		return x;
 	}
@@ -834,6 +915,8 @@ function resolveType(x) {
 	} else if (x instanceof TMember) {
 		return resolveReference(x)
 	} else if (x instanceof TObject) {
+        if (x.qname)
+            return new TQualifiedReference(x.qname) // can happen if a qname was synthesized by resolveReference
 		return resolveObject(x);
 	} else if (x instanceof TQualifiedReference) {
 		return x;
@@ -845,7 +928,9 @@ function resolveType(x) {
 		return x;
 	} else if (x === TAny) {
 		return x;
-	}
+	} else if (x instanceof TTypeQuery) {
+        return resolveReference(x);
+    }
 	var msg;
 	if (x.constructor.name === 'Object')
 		msg = util.inspect(x)
@@ -898,7 +983,7 @@ function resolveObject(type) {
 		return resolveType(typ);
 	})
 	type.modules.forEach(function (name,typ) {
-		resolveObject(typ)
+		resolve(typ)
 	})
 	type.supers = type.supers.map(resolveType)
 	type.calls = type.calls.map(resolveCall)

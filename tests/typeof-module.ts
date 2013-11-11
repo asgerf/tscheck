@@ -3,4 +3,3 @@ declare module A {
 }
 declare var z : typeof A;
 
-var q = z.x;
