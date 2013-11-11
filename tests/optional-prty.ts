@@ -1,3 +1,4 @@
 interface A {
 	x?: number;
 }
+

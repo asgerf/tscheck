@@ -132,26 +132,35 @@ TObject.prototype.getModule = function(name) {
 	}
     return t
 }
-TObject.prototype.getMember = function(name) {
+TObject.prototype.getMember = function(name, optional) {
 	var t = this.properties.get(name)
 	if (!t) {
-	    t = new TObject(null)
+	    t = {
+            optional: !!optional,
+            type:new TObject(null)
+        }
 	    this.properties.put(name,t)
 	}
-	if (!(t instanceof TObject))
+	if (!(t.type instanceof TObject))
 		throw new TypeError("Cannot extend previous definition of " + name)
-    return t
+    return t.type
 }
-TObject.prototype.setMember = function(name,typ) {
+TObject.prototype.setMember = function(name,typ,optional) {
 	var existing = this.properties.get(name)
 	if (existing && !compatibleTypes(typ,existing))
 		throw new TypeError("Duplicate identifier " + name);
-	this.properties.put(name, typ)
+    if (existing) {
+        optional &= existing.optional;
+    }
+	this.properties.put(name, {
+        optional: !!optional,
+        type: typ
+    })
 }
 TObject.prototype.toString = function() {
 	var prtys = []
 	this.properties.forEach(function(name,value) {
-		prtys.push(name + ': ' + value)
+		prtys.push(name + (value.optional? '?' : '') + ': ' + value.type)
 	})
 	this.calls.forEach(function(call)  {
 		prtys.push('(' + call.parameters.map(function(p){return p.name + ':' + p.type}).join(',') + ') => ' + call.returnType)
@@ -176,8 +185,7 @@ function qualify(host, name) {
 		return host + '.' + name;
 }
 
-// TODO: merge properties into modules
-// TODO: optional properties
+// TODO: merge properties into modules after name resolution
 // TODO: external module references (quoted names) and export assignment
 // TODO: typeof operator
 // TODO: built-in types
@@ -351,6 +359,7 @@ function parseClass(node, constructorType, host) {
             }
         }
         else if (member instanceof TypeScript.VariableDeclarator) {
+            // note: class members cannot be optional (AST is not even valid if one tries to do so)
         	var typ = member.isStatic() ? constructorType : instanceType;
             typ.setMember(member.id.text(), member.typeExpr ? parseType(member.typeExpr) : TAny)
         }
@@ -380,8 +389,9 @@ function parseInterface(node, host) {
             t.calls.push(parseFunctionType(member))
         }
         else if (member instanceof TypeScript.VariableDeclarator) {
+            var optional = TypeScript.hasFlag(member.id.getFlags(), TypeScript.ASTFlags.OptionalName)
             var t = member.typeExpr ? parseType(member.typeExpr) : TAny;
-            typ.setMember(member.id.text(), t)
+            typ.setMember(member.id.text(), t, optional)
         }
         else {
             throw new TypeError("Unexpected member " + member.constructor.name + " in interface")
@@ -535,7 +545,10 @@ function isOnlyFunction(typ) {
 		   typ.supers.length === 0;
 }
 
-function mergePropertyInto(typ, other) {
+function mergePropertyInto(hostPrty, otherPrty) {
+    var typ = hostPrty.type;
+    var other = otherPrty.type;
+    hostPrty.optional &= otherPrty.optional;
 	if (typ instanceof TQualifiedReference && other instanceof TQualifiedReference) {
 		if (typ.qname === other.qname) {
 			return; // ok
@@ -593,6 +606,13 @@ function renameTypeParametersInCall(call, mapping) {
 	}
 }
 
+function renameTypeParametersInPrty(prty, mapping) {
+    return {
+        optional: optional,
+        type: renameTypeParametersInType(prty.type, mapping)
+    }
+}
+
 function renameTypeParametersInType(typ, mapping) {
 	if (typ instanceof TTypeParam) {
 		var newName = mapping.get(typ.name)
@@ -602,8 +622,8 @@ function renameTypeParametersInType(typ, mapping) {
 			return typ
 	}
 	else if (typ instanceof TObject) {
-		typ.properties = typ.properties.map(function(name,t) {
-			return renameTypeParametersInType(t, mapping)
+		typ.properties = typ.properties.map(function(name,prty) {
+			return renameTypeParametersInPrty(prty, mapping)
 		})
 		typ.calls = typ.calls.map(function(call) {
 			return renameTypeParametersInCall(call, mapping)
@@ -636,12 +656,12 @@ function mergeInto(typ, other) {
     }
     // rename type parameters to the two types agree on their names
     other = renameTypeParametersInType(other, mapping)
-    other.properties.forEach(function(name,otherT) {
+    other.properties.forEach(function(name,otherPrty) {
     	var existing = typ.properties.get(name)
     	if (!existing) {
-    		typ.setMember(name, otherT)
+    		typ.setMember(name, otherPrty.type, otherPrty.optional)
     	} else {
-    		mergePropertyInto(existing, otherT)
+    		mergePropertyInto(existing, otherPrty)
     	}
     })
     other.types.forEach(function(name,otherT) {
@@ -866,10 +886,13 @@ function resolveParameter(param) {
 }
 
 function resolveObject(type) {
-	type.properties.mapUpdate(function(name,typ) {
-		if (typ.constructor.name == 'Object')
-			throw new TypeError(type.qname + "." + name + " is not a type: " + util.inspect(typ))
-		return resolveType(typ)
+	type.properties.mapUpdate(function(name,prty) {
+		if (prty.type.constructor.name == 'Object')
+			throw new TypeError(type.qname + "." + name + " is not a type: " + util.inspect(prty.type))
+		return {
+            optional: prty.optional,
+            type: resolveType(prty.type)
+        }
 	})
 	type.types.mapUpdate(function(name,typ) {
 		return resolveType(typ);
