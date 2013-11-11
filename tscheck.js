@@ -1007,6 +1007,7 @@ function resolveObject(type) {
 	})
 	type.supers = type.supers.map(resolveType)
 	type.calls = type.calls.map(resolveCall)
+    type.typeParameters = type.typeParameters.map(resolveTypeParameter)
 	return type;
 }
 
@@ -1021,7 +1022,7 @@ function nameResolutionPhase() {
     type_env.forEach(function(name,type) {
     	resolve(type)
     })
-    resolveObject(global_type)
+    // resolveObject(global_type)
 }
 
 // --------------------------------------------
@@ -1123,6 +1124,9 @@ function outputType(type) {
     }
     else if (type instanceof TEnum) {
         return { type: 'enum', name: type.qname }
+    }
+    else if (type instanceof TString) {
+        return { type: 'string-const', value: type.value }
     }
     else {
         throw new Error("Cannot output " + (type && type.constructor.name) + ': ' + util.inspect(type))
