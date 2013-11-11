@@ -7,6 +7,7 @@ require('sugar')
 var util = require('util')
 
 program
+    .option('--complete')
     .parse(process.argv)
 
 var file = program.args[0]
@@ -56,6 +57,13 @@ function compatibleTypes(x,y) {
 	if (x instanceof TQualifiedReference && y instanceof TQualifiedReference)
 		return x.qname === y.qname;
 	return false;
+}
+
+function TBuiltin(name) {
+    this.name = name; // 'number', 'string', 'boolean', ...
+}
+TBuiltin.prototype.toString = function() {
+    return this.name
 }
 
 // Reference to type with the given qualified name
@@ -178,12 +186,24 @@ TObject.prototype.toString = function() {
 }
 
 // The any type (only one instance of this)
-var TAny = new function TAny() {}
-TAny.toString = function() { return 'any' }
+var TAny = new TBuiltin('any');
 
 // -----------------------------------
 //  Extract type environment from AST
 // -----------------------------------
+
+function isBuiltin(x) {
+    switch (x) {
+        case 'any':
+        case 'number':
+        case 'boolean':
+        case 'string':
+        case 'void':
+            return true;
+        default:
+            return false;
+    }
+}
 
 function qualify(host, name) {
     if (host === '')
@@ -632,7 +652,7 @@ function renameTypeParametersInCall(call, mapping) {
 
 function renameTypeParametersInPrty(prty, mapping) {
     return {
-        optional: optional,
+        optional: prty.optional,
         type: renameTypeParametersInType(prty.type, mapping)
     }
 }
@@ -857,6 +877,8 @@ function lookupPrtyInScope(scope, name) {
 // Resolves a TReference or TMember to a TQualifiedReference
 function resolveReference(x, isModule) {
 	if (x instanceof TReference) {
+        if (isBuiltin(x.name))
+            return new TBuiltin(x.name)
 		if (x.resolution)
 			return x.resolution
 		if (x.resolving)
@@ -864,7 +886,7 @@ function resolveReference(x, isModule) {
 		x.resolving = true
 		var t = lookupInScope(x.scope, x.name, isModule)
 		if (!t) {
-			t = new TQualifiedReference(x.name) // XXX: for now, assume this is global type
+            t = new TQualifiedReference(x.name) // XXX: for now assume global reference
 			// throw new TypeError("Unresolved type: " + x.name)
 		}
 		t = resolveReference(t, isModule)
@@ -926,7 +948,7 @@ function resolveType(x) {
 		return new TGeneric(resolveType(x.base), x.args.map(resolveType))
 	} else if (x instanceof TString) {
 		return x;
-	} else if (x === TAny) {
+	} else if (x instanceof TBuiltin) {
 		return x;
 	} else if (x instanceof TTypeQuery) {
         return resolveReference(x);
