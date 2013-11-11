@@ -978,16 +978,11 @@ function resolveTypeParameter(tp) {
 }
 
 function resolveParameter(param) {
-	try {
-		return {
-			optional: param.optional,
-			name: param.name,
-			type: resolveType(param.type)
-		}	
-	} catch (e) {
-		console.log(param)
-		throw e;
-	}
+	return {
+		optional: param.optional,
+		name: param.name,
+		type: resolveType(param.type)
+	}	
 }
 
 function resolveObject(type) {
@@ -1022,7 +1017,6 @@ function nameResolutionPhase() {
     type_env.forEach(function(name,type) {
     	resolve(type)
     })
-    // resolveObject(global_type)
 }
 
 // --------------------------------------------
