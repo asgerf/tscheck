@@ -48,6 +48,16 @@ Map.prototype.mapUpdate = function(callback) {
         this[k] = callback(k.substring(1), this[k]);
     }
 }
+Map.prototype.mapv = function(callback) {
+    var result = new Map;
+    for (var k in this) {
+        if (!this.hasOwnProperty(k)) {
+            continue;
+        }
+        result[k] = callback(this[k]);
+    }
+    return result
+}
 Map.prototype.clone = function() {
     var result = new Map
     for (var k in this) {
@@ -66,6 +76,16 @@ Map.prototype.size = function() {
         x++;
     }
     return x;
+}
+Map.prototype.json = function() {
+    var result = {}
+    for (var k in this) {
+        if (!this.hasOwnProperty(k))
+            continue;
+        var key = k.substring(1)
+        result[key] = this[k]
+    }
+    return result;
 }
 
 // Specialized methods

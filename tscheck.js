@@ -1,18 +1,9 @@
 #!/usr/bin/env node
 var TypeScript = require('./ts')
 var fs = require('fs')
-var program = require('commander')
 var Map = require('./map')
 require('sugar')
 var util = require('util')
-
-program
-    .option('--complete')
-    .parse(process.argv)
-
-var file = program.args[0]
-var text = fs.readFileSync(file, 'utf8')
-var ast = TypeScript.parse(text)
 
 function getLine(node) {
     return ast.lineMap.getLineNumberFromPosition(node.minChar) // FIXME: doesn't seem to work
@@ -570,10 +561,10 @@ function parseFunctionType(node) {
     return result
 }
 
-
-// fire up all the machinery above
-var global_type = parseTopLevel(ast)
-
+var global_type;
+function parsingPhase() {
+    global_type = parseTopLevel(ast)
+}
 
 
 // --------------------
@@ -744,7 +735,9 @@ function mergeScopeTypes(x) {
 	})
 }
 
-mergeObjectTypes(global_type)
+function mergingPhase() {
+    mergeObjectTypes(global_type)
+}
 
 
 // ----------------------------------
@@ -752,7 +745,9 @@ mergeObjectTypes(global_type)
 // ----------------------------------
 
 
-var type_env = new Map
+var type_env;
+var next_synthetic;
+
 function buildEnv(type) {
 	if (type instanceof TObject) {
 		type.types.mapUpdate(function(name,typ) {
@@ -777,10 +772,13 @@ function buildEnv(type) {
 	}
 }
 
-global_type.qname = '<global>';
-buildEnv(global_type)
+function typeEnvironmentPhase() {
+    type_env = new Map
+    global_type.qname = '<global>'
+    next_synthetic = 1
+    buildEnv(global_type)
+}
 
-var next_synthetic = 1
 function synthesizeName(obj)  {
     if (obj.qname === null) {
         obj.qname = '#' + (next_synthetic++);
@@ -1019,10 +1017,12 @@ function resolve(x) {
 	return x;
 }
 
-type_env.forEach(function(name,type) {
-	resolve(type)
-})
-resolveObject(global_type)
+function nameResolutionPhase() {
+    type_env.forEach(function(name,type) {
+    	resolve(type)
+    })
+    resolveObject(global_type)
+}
 
 // --------------------------------------------
 //  	Dump (for debugging)
@@ -1042,5 +1042,145 @@ TMember.prototype.inspect = function() {
 }
 // console.log(util.inspect(global_type, {depth:null}))
 
-console.log(util.inspect(type_env, {depth:null}))
+// console.log(util.inspect(type_env, {depth:null}))
 
+
+// --------------------------------------------
+//      Output
+// --------------------------------------------
+
+function outputParameter(param) {
+    return {
+        name: param.name,
+        optional: param.optional,
+        type: outputType(param.type)
+    }
+}
+
+function outputCall(call) {
+    if (call.indexer)
+        return null;
+    return {
+        'new': call.new,
+        variadic: call.variadic,
+        typeParameters: call.typeParameters.map(outputTypeParameter),
+        parameters: call.parameters.map(outputParameter),
+        returnType: outputType(call.returnType)
+    }
+}
+
+function outputProperty(prty) {
+    return {
+        optional: prty.optional,
+        type: outputType(prty.type)
+    }
+}
+
+function outputTypeParameter(tp) {
+    return {
+        name: tp.name,
+        constraint: tp.constraint && outputType(tp.constraint)
+    }
+}
+
+function findIndexer(calls, typeName) {
+    for (var i=0; i<calls.length; i++) {
+        var call = calls[i];
+        if (call.indexer && call.parameters[0] instanceof TBuiltin && call.parameters[0].name === typeName) {
+            return call;
+        }
+    }
+    return null;
+}
+
+function outputType(type) {
+    if (type instanceof TObject) {
+        return {
+            type: 'object',
+            typeParameters: type.typeParameters.map(outputTypeParameter),
+            properties: type.properties.mapv(outputProperty).json(),
+            calls: type.calls.map(outputCall).compact(),
+            stringIndexer: findIndexer(type.calls, 'string'),
+            numberIndexer: findIndexer(type.calls, 'number'),
+            supers: type.supers.map(outputType)
+        }
+    }
+    else if (type instanceof TQualifiedReference) {
+        return {type: 'reference', name:type.qname}
+    }
+    else if (type instanceof TTypeParam) {
+        return {type: 'type-param', name:type.name}
+    }
+    else if (type instanceof TGeneric)  {
+        return {
+            type: 'generic',
+            base: outputType(type.base),
+            args: type.args.map(outputType)
+        }
+    }
+    else if (type instanceof TBuiltin) {
+        return { type: type.name }
+    }
+    else if (type instanceof TEnum) {
+        return { type: 'enum', name: type.qname }
+    }
+    else {
+        throw new Error("Cannot output " + (type && type.constructor.name) + ': ' + util.inspect(type))
+    }
+}
+function outputTypeEnv() {
+    return type_env.mapv(outputType).json()
+}
+function outputPhase() {
+    return {
+        global: "<global>",
+        env: outputTypeEnv()
+    }
+}
+
+// --------------------------------------------
+//      Public API
+// --------------------------------------------
+
+module.exports = convert;
+var ast;
+function convert(text) {
+    ast = TypeScript.parse(text)
+    parsingPhase()
+    mergingPhase()
+    typeEnvironmentPhase()
+    nameResolutionPhase()
+    var json = outputPhase();
+
+    // clean-up
+    ast = null;
+    global_type = null;
+    type_env = null;
+    current_scope = null;
+    current_node = null;
+
+    return json;
+}
+
+
+// --------------------------------------------
+//      Entry Point
+// --------------------------------------------
+
+function main() {
+    var program = require('commander')
+    program.option('--pretty')
+    program.parse(process.argv)
+
+    var file = program.args[0]
+    var text = fs.readFileSync(file, 'utf8')
+    var json = convert(text)
+    if (program.pretty)
+        console.log(util.inspect(json, {depth:null}))
+    else
+        console.log(JSON.stringify(json))
+}
+
+if (require.main === module) {
+    main();
+}
