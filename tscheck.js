@@ -1207,6 +1207,7 @@ function convert(text) {
     ast = null;
     global_type = null;
     type_env = null;
+    extern_types = null;
     current_scope = null;
     current_node = null;
 
