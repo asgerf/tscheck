@@ -205,7 +205,6 @@ function qualify(host, name) {
 		return host + '.' + name;
 }
 
-// TODO: merge properties into modules after name resolution
 // TODO: external module references (quoted names) and export assignment
 // TODO: built-in types
 // TODO: generate output
@@ -1019,6 +1018,24 @@ function nameResolutionPhase() {
     })
 }
 
+
+// ---------------------------------------------------
+//     Demodule phase: Convert modules to properties
+// ---------------------------------------------------
+
+function demodule(t) {
+    t.modules.forEach(function(name,value) {
+        if (t.properties.has(name))
+            throw new TypeError(t.qname + "." + name + " of type " + t.properties.get(name).type + " clashes with name of module");
+        t.setMember(name,value)
+        demodule(resolveToObject(value))
+    })
+}
+
+function demodulePhase() {
+    demodule(global_type);
+}
+
 // --------------------------------------------
 //  	Dump (for debugging)
 // --------------------------------------------
@@ -1148,6 +1165,7 @@ function convert(text) {
     mergingPhase()
     typeEnvironmentPhase()
     nameResolutionPhase()
+    demodulePhase()
     var json = outputPhase();
 
     // clean-up
