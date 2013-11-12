@@ -183,6 +183,8 @@ var TAny = new TBuiltin('any');
 //  Extract type environment from AST
 // -----------------------------------
 
+var extern_types;
+
 function isBuiltin(x) {
     switch (x) {
         case 'any':
@@ -241,13 +243,13 @@ function addModuleMember(member, moduleObject, qname) {
     		var enumObj = moduleObject.getModule(name)
     		var enumObj = parseEnum(member, enumObj, qname)
     		moduleObject.types.push(name, enumObj.enum)
-    		// moduleObject.setMember(name, enumObj.object)
     	} else {
-    		// TODO: external module (ie. quoted name)
-    		var submodule = moduleObject.getModule(name)
-    		parseModule(member, submodule, qualify(qname, name))
-			// moduleObject.types.push(name, submodule)
-			// moduleObject.setMember(name, new TQualifiedReference(submodule.qname))
+            if (name[0] === '"' || name[0] === "'") { // external module?
+                parseExternModule(member)
+            } else {
+                var submodule = moduleObject.getModule(name)
+                parseModule(member, submodule, qualify(qname, name))    
+            }
     	}
     }
     else if (member instanceof TypeScript.ClassDeclaration) {
@@ -295,6 +297,24 @@ function parseModule(node, moduleObject, qname) {
     current_scope = current_scope.parent // pop TLocalScope
     current_scope = current_scope.parent // pop TModuleScope
     return moduleObject;
+}
+
+function parseExternModule(node) {
+    current_node = node;
+    var rawName = node.name.text()
+    var name = rawName.substring(1, rawName.length-1) // remove quotes
+    var exportAssignment = node.members.members.find(function(member) {
+        return member instanceof TypeScript.ExportAssignment
+    })
+    if (exportAssignment) {
+        if (extern_types.has(name))
+            throw new TypeError("Redeclared external module: " + name)
+        extern_types.put(name, new TTypeQuery([exportAssignment.id.text()], current_scope))
+        if (node.members.members.length !== 1)
+            throw new TypeError("Members next to export assignment are not supported");
+    } else {
+        throw new TypeError("External modules without export assignment is not supported");
+    }
 }
 
 function parseEnum(node, objectType, host) {
@@ -560,6 +580,7 @@ function parseFunctionType(node) {
 
 var global_type;
 function parsingPhase() {
+    extern_types = new Map;
     global_type = parseTopLevel(ast)
 }
 
@@ -1014,6 +1035,9 @@ function nameResolutionPhase() {
     type_env.forEach(function(name,type) {
     	resolve(type)
     })
+    extern_types.mapUpdate(function(name,type) {
+        return resolveReference(type)
+    })
 }
 
 
@@ -1153,13 +1177,16 @@ function outputType(type) {
         throw new Error("Cannot output " + (type && type.constructor.name) + ': ' + util.inspect(type))
     }
 }
-function outputTypeEnv() {
-    return type_env.mapv(outputType).json()
+function outputExtern(t) {
+    if (!(t instanceof TQualifiedReference))
+        throw new Error("Unresolved extern: " + t)
+    return t.qname;
 }
 function outputPhase() {
     return {
         global: "<global>",
-        env: outputTypeEnv()
+        env: type_env.mapv(outputType).json(),
+        externs: extern_types.mapv(outputExtern).json()
     }
 }
 

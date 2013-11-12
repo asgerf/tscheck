@@ -13,6 +13,7 @@ tscheck converts a TypeScript declaration file (`*.d.ts`) into a type environmen
 type TypeScriptDeclarationFile = {
 	env: TypeEnv
 	global: string 	// name of global type in TypeEnv
+	externs: StringMap[string] // external module names -> key in TypeEnv
 }
 
 interace StringMap[T] = {
