@@ -17,6 +17,15 @@ var typeDeclFile = program.args[1];
 var typeDeclText = fs.readFileSync(typeDeclFile, 'utf8');
 var typeDecl = typeDeclFile.endsWith('.json') ? JSON.parse(typeDeclText) : tsconvert(typeDeclText);
 
+// reportUniqueError attempts to avoid repeating previous errors
+var unique_error_ids = new Map;
+function reportUniqueError(uid, msg) {
+	if (unique_error_ids.has(uid))
+		return;
+	unique_error_ids.put(uid, true)
+	console.log(msg)
+}
+
 function lookupObject(key) {
 	var obj = snapshot.heap[key];
 	if (!obj) {
@@ -28,15 +37,21 @@ function lookupObject(key) {
 function lookupQType(qname) {
 	var t = typeDecl.env[qname];
 	if (!t) {
-		throw new Error("Type " + qname + " is not defined");
+		reportUniqueError('missing:' + qname, "Error: Type " + qname + " is not defined");
 	}
 	return t;
 }
-function findPrty(obj, name) {
-	if (!obj.properties) {
-		console.log(obj)
-	}
+function findPrtyDirect(obj, name) {
 	return obj.properties.find(function(x) { return x.name == name });
+}
+function findPrty(obj, name) {
+	while (obj) {
+		var prty = findPrtyDirect(obj,name)
+		if (prty)
+			return prty;
+		obj = obj.prototype && lookupObject(obj.prototype.key);
+	}
+	return null;
 }
 
 function formatType(type) {
@@ -81,7 +96,7 @@ function qualify(host, name) {
 
 function check(type, value, path) {
 	function reportError(msg) {
-		console.log("Type error at " + path + ": " + msg)
+		console.log((path || '<global>') + ": " + msg)
 	}
 	function must(condition) {
 		if (!condition) {
@@ -101,6 +116,8 @@ function check(type, value, path) {
 			assumptions.put(value.key + '@' + type.name, true)	
 		}
 		type = lookupQType(type.name);
+		if (!type)
+			return; // an error was already issued, just assume check passed
 	}
 	switch (type.type) {
 		case 'object':
@@ -108,7 +125,7 @@ function check(type, value, path) {
 				var obj = lookupObject(value.key)
 				for (var k in type.properties) {
 					var typePrty = type.properties[k]
-					var objPrty = findPrty(obj, k) // todo: look up in prototypes too
+					var objPrty = findPrty(obj, k)
 					if (!objPrty) {
 						if (!typePrty.optional) {
 							reportError("missing property " + k)
