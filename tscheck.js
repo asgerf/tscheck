@@ -207,8 +207,6 @@ function qualify(host, name) {
 		return host + '.' + name;
 }
 
-// TODO: external module references (quoted names) and export assignment
-
 // Because some types can be extended, we must be careful to distinguish structural types
 // from nominal types. For example, parseModule may return a structural type corresponding
 // to the body of a module declaration A.B.C, but the final structure of A.B.C may be different.
