@@ -1022,11 +1022,23 @@ function nameResolutionPhase() {
 // ---------------------------------------------------
 
 function demodule(t) {
-    t.modules.forEach(function(name,value) {
-        if (t.properties.has(name))
-            throw new TypeError(t.qname + "." + name + " of type " + t.properties.get(name).type + " clashes with name of module");
-        t.setMember(name,value)
-        demodule(resolveToObject(value))
+    t.modules.forEach(function(name,ref) {
+        var module = resolveToObject(ref)
+        if (t.properties.has(name)) {
+            var typ = t.properties.get(name).type
+            if (isOnlyFunction(typ)) {
+                typ.calls.forEach(function(call) {
+                    module.calls.push(call)
+                })
+            } else {
+               throw new TypeError(t.qname + "." + name + " of type " + t.properties.get(name).type + " clashes with name of ref"); 
+            }
+        }
+        t.properties.put(name, {
+            optional: false, 
+            type: ref
+        })
+        demodule(module)
     })
 }
 
@@ -1184,12 +1196,15 @@ function convert(text) {
 function main() {
     var program = require('commander')
     program.option('--pretty')
+        .option('--silent')
     program.parse(process.argv)
 
     var file = program.args[0]
     var text = fs.readFileSync(file, 'utf8')
     var json = convert(text)
-    if (program.pretty)
+    if (program.silent)
+        {}
+    else if (program.pretty)
         console.log(util.inspect(json, {depth:null}))
     else
         console.log(JSON.stringify(json))
