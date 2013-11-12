@@ -206,8 +206,6 @@ function qualify(host, name) {
 }
 
 // TODO: external module references (quoted names) and export assignment
-// TODO: built-in types
-// TODO: generate output
 
 // Because some types can be extended, we must be careful to distinguish structural types
 // from nominal types. For example, parseModule may return a structural type corresponding
