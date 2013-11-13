@@ -1,0 +1,15 @@
+testdir="../tscheck-tests"
+decls=$(find $testdir -name "*.d.ts")
+for decl in $decls
+do
+	prefix=${decl%*.d.ts}
+	snapshot="$prefix.jsnap"
+	name=$(basename $prefix)
+	echo $name
+	if [ -f $snapshot ];
+	then
+		./tscheck.js $snapshot $decl >output/$name.txt
+	fi
+	# snapshot="$name.jsnap"
+	# ./tscheck.js $snapshot $decl
+done
