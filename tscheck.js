@@ -78,7 +78,12 @@ function findPrty(obj, name) {
 	return null;
 }
 
-
+function resolve(t) {
+	if (t.type === 'reference')
+		return lookupObject(t.name)
+	else
+		return t;
+}
 
 // ----------------------------------------------
 // 		 Type Parameter Substitution
@@ -238,14 +243,77 @@ function canonicalizeType(type) {
 	}
 }
 
+
+// ---------------------------------
+// 		 Super-Type Collapse
+// ---------------------------------
+
+function unfoldSuperType(sup) {
+	if (sup.type === 'reference') {
+		return lookupQType(sup.name)
+	}
+	else if (sup.type === 'generic') {
+		if (sup.base.type !== 'reference')
+			throw new Error("Base type of generic must be a reference"); // TODO: update spec to enforce this
+		var objectType = lookupQType(sup.base.name)
+		if (!objectType)
+			return; // error issued elsewhere
+		if (objectType.typeParameters.length !== sup.args.length) {
+			reportError("expected " + objectType.typeParameters.length + " type parameters but got " + sup.args.length);
+			return;
+		}
+		var tenv = new Map
+		for (var i=0; i<objectType.typeParameters.length; i++) {
+			tenv.put(objectType.typeParameters[i].name, sup.args[i])
+		}
+		var instantiatedType = substType(objectType, tenv)
+		return instantiatedType;
+	}
+	else {
+		throw new Error("Unrecognized super type: " + util.inspect(sup))
+	}
+}
+
+function includeSupers(obj) { // TODO: check for cycles?
+	if (obj.type !== 'object')
+		return;
+	if (obj.supers.length === 0)
+		return;
+	obj.supers.forEach(function(sup) {
+		sup = unfoldSuperType(sup)
+		if (!sup)
+			return; // error issued elsewhere
+		includeSupers(sup)
+		for (k in sup.properties) {
+			if (obj.properties.hasOwnProperty(k))
+				continue;
+			obj.properties[k] = sup.properties[k]
+		}
+		sup.calls.forEach(function(call) {
+			obj.calls.push(call)
+		})
+		if (sup.stringIndexer && !obj.stringIndexer)
+			obj.stringIndexer = sup.stringIndexer;
+		if (sup.numberIndexer && !obj.numberIndexer)
+			obj.numberIndexer = sup.numberIndexer;
+	})
+	obj.supers = [];
+	return obj;
+}
+for (var k in typeDecl.env) {
+	// only types named directly in the type environment can declare supertypes
+	includeSupers(typeDecl.env[k])
+}
+
 // ------------------------------------------------------------
 // 		 Recursive check of Value vs Type
 // ------------------------------------------------------------
 
 var assumptions = {}
 function check(type, value, path) {
-	function reportError(msg) {
-		console.log((path || '<global>') + ": " + msg)
+	function reportError(msg, optPath) {
+		var optPath = optPath || path;
+		console.log((optPath || '<global>') + ": " + msg)
 	}
 	function must(condition) {
 		if (!condition) {
@@ -272,14 +340,13 @@ function check(type, value, path) {
 	switch (type.type) {
 		case 'object':
 			if (must(typeof value === 'object')) {
-				// todo: also check supers
 				var obj = lookupObject(value.key)
 				for (var k in type.properties) {
 					var typePrty = type.properties[k]
 					var objPrty = findPrty(obj, k)
 					if (!objPrty) {
 						if (!typePrty.optional) {
-							reportError("missing property " + k)
+							reportError("expected " + formatType(typePrty.type) + " but found nothing", qualify(path,k))
 						}
 					} else {
 						if (objPrty.value) {
@@ -351,6 +418,8 @@ check(lookupQType(typeDecl.global), {key: snapshot.global}, '');
 // 		Formatting types and values
 // ------------------------------------------
 
+// TODO: restrict depth to avoid printing gigantic types
+
 function formatTypeProperty(name,prty) {
 	return name + (prty.optional ? '?' : '') + ': ' + formatType(prty.type)
 }
@@ -358,7 +427,7 @@ function formatTypeCall(call) {
 	return '(' + call.parameters.map(formatParameter).join(', ') + ') => ' + formatType(call.returnType)
 }
 function formatParameter(param) {
-	return param.name + (param.optional ? '?' : '') + ':' + param.type
+	return param.name + (param.optional ? '?' : '') + ':' + formatType(param.type)
 }
 
 function formatType(type) {
@@ -373,6 +442,8 @@ function formatType(type) {
 			}
 			members = members.concat(type.calls.map(formatTypeCall).join(', '));
 			return '{' + members.join(', ') + '}'
+		case 'generic':
+			return formatType(type.base) + '<' + type.args.map(formatType).join(', ') + '>'
 		case 'string':
 			return 'string';
 		case 'number':
@@ -383,6 +454,10 @@ function formatType(type) {
 			return 'void';
 		case 'any':
 			return 'any';
+		case 'string-const':
+			return '"' + type.value + '"';
+		case 'enum':
+			return type.name;
 	}
 	return util.inspect(type)
 }
