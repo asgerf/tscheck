@@ -541,12 +541,12 @@ function parseConstructorFunction(node, selfTypeRef, instanceTypeParams) {
 	current_scope = new TTypeParameterScope(current_scope)
 	var typeParams = []
 	instanceTypeParams.forEach(function(tp,index) {
-		current_scope.put(tp.name, new TTypeParam(tp.name))
+		current_scope.env.put(tp.name, new TTypeParam(tp.name))
 		typeParams.push(tp)
 	})
 	node.typeArguments && node.typeArguments.members.forEach(function (tp,index) {
 		var name = tp.name.text()
-		current_scope.put(name, new TTypeParam(name))
+		current_scope.env.put(name, new TTypeParam(name))
 		typeParams.push(parseTypeParameter(tp))
 	})
 	var t = {
