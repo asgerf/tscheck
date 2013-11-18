@@ -64,7 +64,10 @@ function lookupQType(qname) {
 	return t;
 }
 
-
+function getPrototype(key) {
+	var obj = lookupObject(key)
+	return obj.prototype && obj.prototype.key
+}
 function findPrtyDirect(obj, name) {
 	return obj.properties.find(function(x) { return x.name == name });
 }
@@ -83,6 +86,24 @@ function resolve(t) {
 		return lookupObject(t.name)
 	else
 		return t;
+}
+
+// Cyclic Prototype Detection. (Mostly for debugging jsnap)
+
+function checkCyclicPrototype(key) {
+	var slow = key;
+	var fast = key;
+	while (true) {
+		fast = getPrototype(fast)
+		if (!fast)
+			return false;
+		fast = getPrototype(fast)
+		if (!fast)
+			return false;
+		slow = getPrototype(slow)
+		if (slow === fast)
+			return true;
+	}
 }
 
 // ----------------------------------------------
@@ -343,6 +364,10 @@ function check(type, value, path) {
 				var obj = lookupObject(value.key)
 				for (var k in type.properties) {
 					var typePrty = type.properties[k]
+					if (checkCyclicPrototype(value.key)) {
+						reportError("Cyclic prototype chain");
+						return;
+					}
 					var objPrty = findPrty(obj, k)
 					if (!objPrty) {
 						if (!typePrty.optional) {
