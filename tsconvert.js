@@ -13,6 +13,7 @@ function TypeError(msg) {
 	return new Error(msg + " (line " + (current_node && getLine(current_node)) + ")")
 }
 
+// NOTE: some aliasing of TObject occurs when type parameter bounds are copied into constructor type parameters
 
 // --------------------
 // Scope Chains
@@ -378,10 +379,12 @@ function parseClass(node, constructorType, host) {
     node.implementsList && node.implementsList.members.forEach(function(ext) {
         instanceType.supers.push(parseType(ext))
     })
+    var hasConstructor = false;
     node.members.members.forEach(function(member) {
     	current_scope = member.isStatic() ? static_scope : instance_scope;
         if (member instanceof TypeScript.FunctionDeclaration) {
             if (member.isConstructor) { // syntax: constructor()..
+                hasConstructor = true;
                 constructorType.calls.push(parseConstructorFunction(member, selfType, typeParams))
             } else {
             	var container = member.isStatic() ? constructorType : instanceType;
@@ -395,6 +398,17 @@ function parseClass(node, constructorType, host) {
             typ.setMember(member.id.text(), member.typeExpr ? parseType(member.typeExpr) : TAny)
         }
     })
+    // Generate automatic constructor, if no constructors are present
+    if (!hasConstructor) {
+        constructorType.calls.push({
+            new: true,
+            variadic: false,
+            indexer: false,
+            typeParameters: typeParams,
+            parameters: [],
+            returnType: selfType
+        });
+    }
     current_scope = original_scope // restore previous scope
     return {
         constructorType: constructorType,
@@ -523,7 +537,7 @@ function parseParameter(node) {
         type: node.typeExpr ? parseType(node.typeExpr) : TAny
     }
 }
-    
+
 function parseTypeParameter(node) {
 	current_node = node;
     return {
