@@ -5,7 +5,8 @@ var Map = require('./map')
 require('sugar')
 var util = require('util')
 
-function getLine(node) {
+function getLine(node) { // TODO: more robust way of getting line numbers
+    var ast = inputs.find(function(x) {return x.file === current_file}).ast;
     return ast.lineMap.getLineNumberFromPosition(node.minChar) // FIXME: doesn't seem to work
 }
 var current_node = null;
@@ -145,6 +146,7 @@ TObject.prototype.getMember = function(name, optional) {
 	var t = this.properties.get(name)
 	if (!t) {
 	    t = {
+            origin: current_file,
             optional: !!optional,
             type:new TObject(null)
         }
@@ -162,6 +164,7 @@ TObject.prototype.setMember = function(name,typ,optional) {
         optional &= existing.optional;
     }
 	this.properties.put(name, {
+        origin: current_file,
         optional: !!optional,
         type: typ
     })
@@ -287,6 +290,7 @@ function addModuleMember(member, moduleObject, qname) {
 
 function parseModule(node, moduleObject, qname) {
     moduleObject.qname = 'module:' + qname;
+    moduleObject.origin = current_file;
 	current_node = node;
     current_scope = new TModuleScope(moduleObject, current_scope)
     current_scope = new TLocalScope(current_scope)
@@ -339,13 +343,11 @@ function parseEnum(node, objectType, host) {
 
 function parseTopLevel(node) {
 	current_node = node;
-    var t = new TObject('')
-	current_scope = new TModuleScope(t, null)
+	current_scope = new TModuleScope(global_type, null)
     node.moduleElements.members.forEach(function (member) {
-        addModuleMember(member, t, '')
+        addModuleMember(member, global_type, '')
     })
     current_scope = null
-    return t
 }
 
 function parseClass(node, constructorType, host) {
@@ -597,9 +599,14 @@ function parseFunctionType(node) {
 }
 
 var global_type;
+var current_file = '?';
 function parsingPhase() {
+    global_type = new TObject('');
     extern_types = new Map;
-    global_type = parseTopLevel(ast)
+    inputs.forEach(function (input) {
+        current_file = input.file;
+        parseTopLevel(input.ast)
+    });
 }
 
 
@@ -679,6 +686,7 @@ function renameTypeParametersInCall(call, mapping) {
 
 function renameTypeParametersInPrty(prty, mapping) {
     return {
+        origin: prty.origin,
         optional: prty.optional,
         type: renameTypeParametersInType(prty.type, mapping)
     }
@@ -730,7 +738,8 @@ function mergeInto(typ, other) {
     other.properties.forEach(function(name,otherPrty) {
     	var existing = typ.properties.get(name)
     	if (!existing) {
-    		typ.setMember(name, otherPrty.type, otherPrty.optional)
+            typ.properties.put(name, otherPrty)
+    		// typ.setMember(name, otherPrty.type, otherPrty.optional)
     	} else {
     		mergePropertyInto(existing, otherPrty)
     	}
@@ -1026,6 +1035,7 @@ function resolveObject(type) {
 		if (prty.type.constructor.name == 'Object')
 			throw new TypeError(type.qname + "." + name + " is not a type: " + util.inspect(prty.type))
 		return {
+            origin: prty.origin,
             optional: prty.optional,
             type: resolveType(prty.type)
         }
@@ -1076,7 +1086,10 @@ function demodule(t) {
                throw new TypeError(t.qname + "." + name + " of type " + t.properties.get(name).type + " clashes with name of ref"); 
             }
         }
+        if (!module.origin)
+            throw new Error("No origin on module: " + module.qname)
         t.properties.put(name, {
+            origin: module.origin,
             optional: false, 
             type: ref
         })
@@ -1135,6 +1148,7 @@ function outputCall(call) {
 
 function outputProperty(prty) {
     return {
+        origin: prty.origin,
         optional: prty.optional,
         type: outputType(prty.type)
     }
@@ -1213,9 +1227,22 @@ function outputPhase() {
 // --------------------------------------------
 
 module.exports = convert;
-var ast;
-function convert(text) {
-    ast = TypeScript.parse(text)
+var inputs;
+function convert(arg) {
+    if (typeof arg === 'string') {
+        inputs = [{file:'', text:arg}]
+    } else if (arg instanceof Array) {
+        inputs = arg.clone();
+    } else {
+        throw new Error("Illegal argument: " + util.inspect(arg))
+    }
+    inputs = inputs.map(function(input) {
+        return {
+            file: input.file,
+            text: input.text,
+            ast: TypeScript.parse(input.text)  
+        } 
+    })
     parsingPhase()
     mergingPhase()
     typeEnvironmentPhase()
@@ -1224,7 +1251,7 @@ function convert(text) {
     var json = outputPhase();
 
     // clean-up
-    ast = null;
+    inputs = null;
     global_type = null;
     type_env = null;
     extern_types = null;
@@ -1245,9 +1272,13 @@ function main() {
         .option('--silent')
     program.parse(process.argv)
 
-    var file = program.args[0]
-    var text = fs.readFileSync(file, 'utf8')
-    var json = convert(text)
+    var inputs = program.args.map(function(file) {
+        return {
+            file: file,
+            text: fs.readFileSync(file, 'utf8')
+        }
+    })
+    var json = convert(inputs)
     if (program.silent)
         {}
     else if (program.pretty)

@@ -15,8 +15,16 @@ var snapshot = JSON.parse(snapshotText);
 
 var typeDeclFile = program.args[1];
 var typeDeclText = fs.readFileSync(typeDeclFile, 'utf8');
-var typeDecl = typeDeclFile.endsWith('.json') ? JSON.parse(typeDeclText) : tsconvert(typeDeclText);
 
+var libFile = __dirname + "/lib/lib.d.ts";
+var libFileText = fs.readFileSync(libFile, 'utf8');
+
+var LIB_ORIGIN = ">lib.d.ts"; // pad origin with ">" to ensure it does not collide with user input
+
+var typeDecl = tsconvert([
+	{file: LIB_ORIGIN, text:libFileText},
+	{file: typeDeclFile, text:typeDeclText}
+	])
 
 // -----------------------------------
 // 		Miscellaneous util stuff
@@ -331,8 +339,10 @@ for (var k in typeDecl.env) {
 // ------------------------------------------------------------
 
 var assumptions = {}
-function check(type, value, path) {
+function check(type, value, path, userPath) {
 	function reportError(msg, optPath) {
+		if (!userPath)
+			return;
 		var optPath = optPath || path;
 		console.log((optPath || '<global>') + ": " + msg)
 	}
@@ -362,20 +372,22 @@ function check(type, value, path) {
 		case 'object':
 			if (must(typeof value === 'object')) {
 				var obj = lookupObject(value.key)
+				if (checkCyclicPrototype(value.key)) {
+					reportError("Cyclic prototype chain");
+					return;
+				}
 				for (var k in type.properties) {
 					var typePrty = type.properties[k]
-					if (checkCyclicPrototype(value.key)) {
-						reportError("Cyclic prototype chain");
-						return;
-					}
+					var isUserPrty = typePrty.origin != LIB_ORIGIN;
+					var isUserPath = userPath || isUserPrty;
 					var objPrty = findPrty(obj, k)
 					if (!objPrty) {
-						if (!typePrty.optional) {
+						if (!typePrty.optional && isUserPath) {
 							reportError("expected " + formatType(typePrty.type) + " but found nothing", qualify(path,k))
 						}
 					} else {
 						if (objPrty.value) {
-							check(typePrty.type, objPrty.value, qualify(path,k))
+							check(typePrty.type, objPrty.value, qualify(path,k), isUserPath)
 						} else {
 							// todo: getters and setters require static analysis
 						}
@@ -410,7 +422,7 @@ function check(type, value, path) {
 				tenv.put(objectType.typeParameters[i].name, type.args[i])
 			}
 			var instantiatedType = substType(objectType, tenv)
-			check(instantiatedType, value, path) // just check against raw type (anything matches 'type-param' at the moment)
+			check(instantiatedType, value, path, userPath) // just check against raw type (anything matches 'type-param' at the moment)
 			break;
 		case 'enum':
 			must(typeof value === 'number')
@@ -436,7 +448,7 @@ function check(type, value, path) {
 	}
 }
 
-check(lookupQType(typeDecl.global), {key: snapshot.global}, '');
+check(lookupQType(typeDecl.global), {key: snapshot.global}, '', false);
 
 
 // ------------------------------------------

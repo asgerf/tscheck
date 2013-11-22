@@ -44,6 +44,7 @@ interface ObjectType {
 	supers: Array[Type]
 }
 interface Property {
+	origin: string  // which file contributed the property
 	optional: boolean
 	type: Type
 }
