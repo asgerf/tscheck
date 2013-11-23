@@ -15,6 +15,7 @@ function TypeError(msg) {
 }
 
 // NOTE: some aliasing of TObject occurs when type parameter bounds are copied into constructor type parameters
+// TODO: desugar varargs correctly (array vs non-array type)
 
 // --------------------
 // Scope Chains
@@ -140,6 +141,7 @@ TObject.prototype.getModule = function(name) {
 	    t = new TObject(null)
 	    this.modules.put(name,t)
 	}
+    t.origin = current_file
     return t
 }
 TObject.prototype.getMember = function(name, optional) {
@@ -1101,6 +1103,126 @@ function demodulePhase() {
     demodule(global_type);
 }
 
+
+
+// ---------------------------------------------------
+//     Inheritance
+// ---------------------------------------------------
+
+function substProperty(prty, tenv) {
+    return {
+        origin: prty.origin,
+        optional: prty.optional,
+        type: substType(prty.type, tenv)
+    }
+}
+function substParameter(param, tenv) {
+    return {
+        name: param.name,
+        optional: param.optional,
+        type: substType(param.type, tenv)
+    }
+}
+function substCall(call, tenv) {
+    var typeParams = []
+    if (call.typeParameters.length > 0) {
+        tenv = tenv.clone()
+        call.typeParameters.forEach(function(tp) {
+            tenv.remove(tp.name) // shadowed
+            typeParams.push({
+                name: tp.name,
+                constraint: tp.constraint && substType(tp.constraint, tenv)
+            })
+        })
+    }
+    return {
+        new: call.new,
+        variadic: call.variadic,
+        indexer: call.indexer,
+        typeParameters: typeParams,
+        parameters: call.parameters.map(substParameter.fill(undefined,tenv)),
+        returnType: substType(call.returnType, tenv)
+    }
+}
+
+function substType(type, tenv) {
+    if (type instanceof TObject) {
+        var t = new TObject(null)
+        t.properties = type.properties.mapv(substProperty.fill(undefined,tenv))
+        t.calls = type.calls.map(substCall.fill(undefined,tenv))
+        return t;
+    }
+    else if (type instanceof TGeneric) {
+        return new TGeneric(substType(type.base, tenv), type.args.map(substType.fill(undefined,tenv)))
+    }
+    else if (type instanceof TTypeParam) {
+        var t = tenv.get(type.name)
+        if (t)
+            return t;
+        return type;
+    }
+    else {
+        return type;
+    }
+}
+function substWithTypeArgs(type, targs) {
+    if (type.typeParameters.length !== targs.length)
+        throw new Error(type.qname + " expects " + type.typeParameters.length + " type parameters but got " + targs.length)
+    if (targs.length === 0)
+        return;
+    var tenv = new Map
+    for (var i=0; i<targs.length; i++) {
+        tenv.put(type.typeParameters[i].name, targs[i])
+    }
+    return substType(type, tenv)
+}
+
+function cloneProperty(prty) {
+    return substProperty(prty, new Map)
+}
+function cloneCall(call) {
+    return substCall(call, new Map)
+}
+function inheritObject(obj) {
+    if (!(obj instanceof TObject))
+        throw new Error("Unexpected type in inheritObject: " + util.inspect(obj))
+    if (obj.supers.length === 0)
+        return;
+    if (obj.inheriting)
+        throw new Error("Cyclic inheritance involving " + obj.qname)
+    obj.inheriting = true
+    obj.supers.forEach(function(sup) {
+        var superObj;
+        if (sup instanceof TGeneric) {
+            var base = resolveToObject(sup.base);
+            inheritObject(base);
+            superObj = substWithTypeArgs(base, sup.args)
+        } else {
+            superObj = resolveToObject(sup)
+            if (!superObj)
+                return; // only returns to forEach loop
+            inheritObject(superObj)
+        }
+        superObj.properties.forEach(function(name,prty) {
+            if (!obj.properties.has(name)) {
+                obj.properties.put(name, cloneProperty(prty))
+            }
+        })
+        superObj.calls.forEach(function(call) {
+            obj.calls.push(cloneCall(call))
+        })
+    })
+    obj.supers = []
+}
+
+function inheritancePhase() {
+    type_env.forEach(function(name,value) {
+        if (value instanceof TObject) // do not visit enum types
+            inheritObject(value)
+    })
+}
+
+
 // --------------------------------------------
 //  	Dump (for debugging)
 // --------------------------------------------
@@ -1179,8 +1301,7 @@ function outputType(type) {
             properties: type.properties.mapv(outputProperty).json(),
             calls: type.calls.map(outputCall).compact(),
             stringIndexer: findIndexer(type.calls, 'string'),
-            numberIndexer: findIndexer(type.calls, 'number'),
-            supers: type.supers.map(outputType)
+            numberIndexer: findIndexer(type.calls, 'number')
         }
     }
     else if (type instanceof TQualifiedReference) {
@@ -1248,6 +1369,7 @@ function convert(arg) {
     typeEnvironmentPhase()
     nameResolutionPhase()
     demodulePhase()
+    inheritancePhase()
     var json = outputPhase();
 
     // clean-up

@@ -174,7 +174,6 @@ function substType(type, tenv) {
 			typeParameters: [],
 			properties: jsonMap(type.properties, substPrty.fill(undefined,tenv)),
 			calls: type.calls.map(substCall.fill(undefined,tenv)),
-			supers: type.supers.map(substType.fill(undefined,tenv)),
 			stringIndexer: type.stringIndexer && substType(type.stringIndexer, tenv),
 			numberIndexer: type.numberIndexer && substType(type.numberIndexer, tenv)
 		}
@@ -270,68 +269,6 @@ function canonicalizeType(type) {
 		default:
 			throw new Error("Unrecognized type: " + util.inspect(type))
 	}
-}
-
-
-// ---------------------------------
-// 		 Super-Type Collapse
-// ---------------------------------
-
-function unfoldSuperType(sup) {
-	if (sup.type === 'reference') {
-		return lookupQType(sup.name)
-	}
-	else if (sup.type === 'generic') {
-		if (sup.base.type !== 'reference')
-			throw new Error("Base type of generic must be a reference"); // TODO: update spec to enforce this
-		var objectType = lookupQType(sup.base.name)
-		if (!objectType)
-			return; // error issued elsewhere
-		if (objectType.typeParameters.length !== sup.args.length) {
-			reportError("expected " + objectType.typeParameters.length + " type parameters but got " + sup.args.length);
-			return;
-		}
-		var tenv = new Map
-		for (var i=0; i<objectType.typeParameters.length; i++) {
-			tenv.put(objectType.typeParameters[i].name, sup.args[i])
-		}
-		var instantiatedType = substType(objectType, tenv)
-		return instantiatedType;
-	}
-	else {
-		throw new Error("Unrecognized super type: " + util.inspect(sup))
-	}
-}
-
-function includeSupers(obj) { // TODO: check for cycles?
-	if (obj.type !== 'object')
-		return;
-	if (obj.supers.length === 0)
-		return;
-	obj.supers.forEach(function(sup) {
-		sup = unfoldSuperType(sup)
-		if (!sup)
-			return; // error issued elsewhere
-		includeSupers(sup)
-		for (k in sup.properties) {
-			if (obj.properties.hasOwnProperty(k))
-				continue;
-			obj.properties[k] = sup.properties[k]
-		}
-		sup.calls.forEach(function(call) {
-			obj.calls.push(call)
-		})
-		if (sup.stringIndexer && !obj.stringIndexer)
-			obj.stringIndexer = sup.stringIndexer;
-		if (sup.numberIndexer && !obj.numberIndexer)
-			obj.numberIndexer = sup.numberIndexer;
-	})
-	obj.supers = [];
-	return obj;
-}
-for (var k in typeDecl.env) {
-	// only types named directly in the type environment can declare supertypes
-	includeSupers(typeDecl.env[k])
 }
 
 // ------------------------------------------------------------

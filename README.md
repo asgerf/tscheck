@@ -41,7 +41,6 @@ interface ObjectType {
 	calls: Array[Call]
 	stringIndexer: Type | null
 	numberIndexer: Type | null
-	supers: Array[Type]
 }
 interface Property {
 	origin: string  // which file contributed the property
