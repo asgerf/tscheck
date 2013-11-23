@@ -245,8 +245,8 @@ function addModuleMember(member, moduleObject, qname) {
     	var name = member.name.text()
     	if (member.isEnum()) { // enums are ModuleDeclarations in the AST, but they are semantically quite different
     		var enumObj = moduleObject.getModule(name)
-    		var enumObj = parseEnum(member, enumObj, qname)
-    		moduleObject.types.push(name, enumObj.enum)
+    		var enumResult = parseEnum(member, enumObj, qname)
+    		moduleObject.types.push(name, enumResult.enum)
     	} else {
             if (name[0] === '"' || name[0] === "'") { // external module?
                 parseExternModule(member)
@@ -327,11 +327,10 @@ function parseEnum(node, objectType, host) {
 	var qname = qualify(host, node.name.text())
 	var enumType = new TEnum(qname)
 	// var objectType = new TObject(null)
-	var selfTypeRef = new TQualifiedReference(qname)
 	node.members.members.forEach(function (member) {
 		if (member instanceof TypeScript.VariableStatement) {
 			member.declaration.declarators.members.forEach(function (decl) {
-				objectType.setMember(decl.id.text(), selfTypeRef)
+				objectType.setMember(decl.id.text(), enumType)
 			})
 		} else {
 			throw new TypeError("Unexpected enum member: " + member.constructor.name)
@@ -810,10 +809,10 @@ function buildEnv(type) {
 			return type;
 		}
 	}
-	else if (type instanceof TEnum) {
-		type_env.put(type.qname, type)
-		return new TQualifiedReference(type.qname)
-	}
+	// else if (type instanceof TEnum) {
+	// 	type_env.put(type.qname, type)
+	// 	return new TQualifiedReference(type.qname)
+	// }
 	else {
 		return type;
 	}
@@ -997,6 +996,8 @@ function resolveType(x) {
 		return x;
 	} else if (x instanceof TTypeQuery) {
         return resolveReference(x);
+    } else if (x instanceof TEnum) {
+        return x;
     }
 	var msg;
 	if (x.constructor.name === 'Object')
@@ -1297,7 +1298,7 @@ function outputType(type) {
     if (type instanceof TObject) {
         return {
             type: 'object',
-            typeParameters: type.typeParameters.map(outputTypeParameter),
+            // typeParameters: type.typeParameters.map(outputTypeParameter),
             properties: type.properties.mapv(outputProperty).json(),
             calls: type.calls.map(outputCall).compact(),
             stringIndexer: findIndexer(type.calls, 'string'),
@@ -1305,16 +1306,18 @@ function outputType(type) {
         }
     }
     else if (type instanceof TQualifiedReference) {
-        return {type: 'reference', name:type.qname}
+        return {type: 'reference', name:type.qname, typeArguments:[]}
     }
     else if (type instanceof TTypeParam) {
         return {type: 'type-param', name:type.name}
     }
     else if (type instanceof TGeneric)  {
+        if (!(type.base instanceof TQualifiedReference))
+            throw new Error("Malformed TGeneric base in: " + util.inspect(type))
         return {
-            type: 'generic',
-            base: outputType(type.base),
-            args: type.args.map(outputType)
+            type: 'reference',
+            name: type.base.qname,
+            typeArguments: type.args.map(outputType)
         }
     }
     else if (type instanceof TBuiltin) {
@@ -1335,10 +1338,18 @@ function outputExtern(t) {
         throw new Error("Unresolved extern: " + t)
     return t.qname;
 }
+function outputTypeDef(td) {
+    if (!(td instanceof TObject))
+        throw new Error("Only objects can be top-level types")
+    return {
+        typeParameters: td.typeParameters.map(function(tp) {return tp.name}),
+        object: outputType(td)
+    }
+}
 function outputPhase() {
     return {
         global: "<global>",
-        env: type_env.mapv(outputType).json(),
+        env: type_env.mapv(outputTypeDef).json(),
         externs: extern_types.mapv(outputExtern).json()
     }
 }

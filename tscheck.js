@@ -64,12 +64,23 @@ function lookupObject(key) {
 	return obj;
 }
 
-function lookupQType(qname) {
-	var t = typeDecl.env[qname];
-	if (!t) {
+function lookupQType(qname, targs) {
+	var tdecl = typeDecl.env[qname];
+	if (!tdecl) {
 		reportUniqueError('missing:' + qname, "Error: Type " + qname + " is not defined");
+		return null;
 	}
-	return t;
+	if (targs.length !== tdecl.typeParameters.length) {
+		reportUniqueError('targs:' + qname, "Error: Type " + qname + " expects " + tdecl.typeParameters.length + " type arguments but got " + targs.length);
+		return null;
+	}
+	if (targs.length === 0)
+		return tdecl.object; // optimization: skip substitution step if there are no type arguments
+	var tenv = new Map
+	for (var i=0; i<targs.length; i++) {
+		tenv.put(tdecl.typeParameters[i], targs[i])
+	}
+	return substType(tdecl.object, tenv)
 }
 
 function getPrototype(key) {
@@ -87,13 +98,6 @@ function findPrty(obj, name) {
 		obj = obj.prototype && lookupObject(obj.prototype.key);
 	}
 	return null;
-}
-
-function resolve(t) {
-	if (t.type === 'reference')
-		return lookupObject(t.name)
-	else
-		return t;
 }
 
 // Cyclic Prototype Detection. (Mostly for debugging jsnap)
@@ -178,11 +182,11 @@ function substType(type, tenv) {
 			numberIndexer: type.numberIndexer && substType(type.numberIndexer, tenv)
 		}
 		break;
-	case 'generic':
+	case 'reference':
 		return {
-			type: 'generic',
-			base: substType(type.base, tenv),
-			args: type.args.map(substType.fill(undefined,tenv))
+			type: 'reference',
+			name: type.name,
+			typeArguments: type.typeArguments.map(substType.fill(undefined,tenv))
 		}
 	default:
 		return type;
@@ -249,9 +253,13 @@ function canonicalizeType(type) {
 			var id = canonicalizeKey(key);
 			type.canonical_id = id;
 			return id;
-		case 'generic':
-			var key = canonicalizeType(type.base) + '<' + type.args.map(canonicalizeType).join(';') + '>'
-			return canonicalizeKey(key)
+		case 'reference':
+			if (type.typeArguments.length > 0) {
+				var key = '@' + type.name + '<' + type.typeArguments.map(canonicalizeType).join(';') + '>'
+				return canonicalizeKey(key)
+			} else {
+				return '@' + type.name;
+			}
 		case 'number':
 			return 'N';
 		case 'boolean':
@@ -264,8 +272,6 @@ function canonicalizeType(type) {
 			return 'A';
 		case 'void':
 			return 'V';
-		case 'reference':
-			return '@' + type.name;
 		default:
 			throw new Error("Unrecognized type: " + util.inspect(type))
 	}
@@ -294,17 +300,6 @@ function check(type, value, path, userPath) {
 	if (!type) {
 		throw new Error("Undefined type on path: " + path)
 	}
-	if (type.type === 'reference') {
-		if (value.key) {
-			var assumKey = value.key + '~' + canonicalizeType(type);
-			if (assumptions[assumKey])
-				return; // we are assuming this typing holds
-			assumptions[assumKey] = true
-		}
-		type = lookupQType(type.name);
-		if (!type)
-			return; // an error was already issued, just assume check passed
-	}
 	switch (type.type) {
 		case 'object':
 			if (must(typeof value === 'object')) {
@@ -332,34 +327,19 @@ function check(type, value, path, userPath) {
 				}
 			}
 			break;
-		case 'type-param':
-			// should be replaced by substType before we get here
-			throw new Error("Checking value " + formatValue(value) + " against unbound type parameter " + type.name);
-		case 'generic':
-			if (type.base.type !== 'reference')
-				throw new Error("Base type of generic must be a reference"); // TODO: update spec to enforce this
+		case 'reference':
 			if (value === null)
 				return; // null matches any object type
 			if (!must(typeof value === 'object'))
-				return; // only objects can match generic
+				return; // only object types can match a reference
 			var assumKey = value.key + '~' + canonicalizeType(type)
 			if (assumptions[assumKey])
 				return; // already checked or currently checking
 			assumptions[assumKey] = true
-			var objectType = lookupQType(type.base.name)
-			if (!objectType) {
-				return; // error was issued elsewhere
-			}
-			if (objectType.typeParameters.length !== type.args.length) {
-				reportError("expected " + objectType.typeParameters.length + " type parameters but got " + type.args.length);
-				return;
-			}
-			var tenv = new Map
-			for (var i=0; i<objectType.typeParameters.length; i++) {
-				tenv.put(objectType.typeParameters[i].name, type.args[i])
-			}
-			var instantiatedType = substType(objectType, tenv)
-			check(instantiatedType, value, path, userPath) // just check against raw type (anything matches 'type-param' at the moment)
+			var objectType = lookupQType(type.name, type.typeArguments)
+			if (!objectType)
+				return; // error issued elsewhere
+			check(objectType, value, path, userPath)
 			break;
 		case 'enum':
 			must(typeof value === 'number')
@@ -380,12 +360,15 @@ function check(type, value, path, userPath) {
 			break; // no check necessary
 		case 'void':
 			break; // ?
+		case 'type-param':
+			// should be replaced by substType before we get here
+			throw new Error("Checking value " + formatValue(value) + " against unbound type parameter " + type.name);
 		default:
 			throw new Error("Unrecognized type type: " + type.type + " " + util.inspect(type))
 	}
 }
 
-check(lookupQType(typeDecl.global), {key: snapshot.global}, '', false);
+check(lookupQType(typeDecl.global,[]), {key: snapshot.global}, '', false);
 
 
 // ------------------------------------------
@@ -406,8 +389,6 @@ function formatParameter(param) {
 
 function formatType(type) {
 	switch (type.type) {
-		case 'reference':
-			return type.name;
 		case 'object':
 			var members = []
 			for (var k in type.properties) {
@@ -416,8 +397,11 @@ function formatType(type) {
 			}
 			members = members.concat(type.calls.map(formatTypeCall).join(', '));
 			return '{' + members.join(', ') + '}'
-		case 'generic':
-			return formatType(type.base) + '<' + type.args.map(formatType).join(', ') + '>'
+		case 'reference':
+			if (type.typeArguments.length > 0)
+				return type.name + '<' + type.typeArguments.map(formatType).join(', ') + '>'
+			else
+				return type.name;
 		case 'string':
 			return 'string';
 		case 'number':

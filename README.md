@@ -11,32 +11,35 @@ tscheck converts a TypeScript declaration file (`*.d.ts`) into a type environmen
 
 ```
 type TypeScriptDeclarationFile = {
-	env: TypeEnv
-	global: string 	// name of global type in TypeEnv
+	global: string 	// name of global type in env
+	env: StringMap[TypeDef]
 	externs: StringMap[string] // external module names -> key in TypeEnv
 }
 
-interace StringMap[T] = {
-	[s:string]: T
+interace StringMap[T] = { // map from string to T
+	[s:string]: T 	
 }
 
-type TypeEnv = StringMap[TypeDef]
-type Type = TypeDef | TypeRef
-type TypeDef 
+interface TypeDef {
+	typeParameters: Array[string],
+	object: ObjectType
+}
+
+type Type
 	= ObjectType 
 	| EnumType 
 	| BuiltinType 
 	| StringConstType 
 	| TypeParamRef 
-	| GenericType
+	| TypeRef
 
 interface TypeRef {
 	type: 'reference',
-	name: string 	// index into TypeEnv
+	name: string 	// index into type env
+	typeArguments: Array[Type]
 }
 interface ObjectType {
 	type: 'object'
-	typeParameters: Array[TypeParameter]
 	properties: StringMap[Property]
 	calls: Array[Call]
 	stringIndexer: Type | null
@@ -77,10 +80,5 @@ interface StringConstType {
 interface TypeParamRef {
 	type: 'type-param'
 	name: string
-}
-interface GenericType {
-	type: 'generic'
-	base: Type
-	args: Array[Type]
 }
 ```
