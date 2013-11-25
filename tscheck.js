@@ -22,8 +22,8 @@ var libFileText = fs.readFileSync(libFile, 'utf8');
 var LIB_ORIGIN = ">lib.d.ts"; // pad origin with ">" to ensure it does not collide with user input
 
 var typeDecl = tsconvert([
-	{file: LIB_ORIGIN, text:libFileText},
-	{file: typeDeclFile, text:typeDeclText}
+		{file: LIB_ORIGIN, text:libFileText},
+		{file: typeDeclFile, text:typeDeclText}
 	])
 
 // -----------------------------------
@@ -242,9 +242,6 @@ function canonicalizeType(type) {
 			type.calls.forEach(function(call) {
 				bag.push('#' + canonicalizeCall(call))
 			})
-			type.supers.forEach(function(sup) {
-				bag.push('<:' + canonicalizeType(sup))
-			})
 			if (type.stringIndexer)
 				bag.push('[S]:' + canonicalizeType(type.stringIndexer))
 			if (type.numberIndexer)
@@ -272,6 +269,8 @@ function canonicalizeType(type) {
 			return 'A';
 		case 'void':
 			return 'V';
+		case 'enum':
+			return 'E:' + type.name;
 		default:
 			throw new Error("Unrecognized type: " + util.inspect(type))
 	}
