@@ -1,0 +1,7 @@
+DIR="testcases"
+
+FILES=`find $DIR -name "*.d.ts"`
+for file in $FILES
+do
+	./tsconvert.js --include-lib $file > $file.json
+done

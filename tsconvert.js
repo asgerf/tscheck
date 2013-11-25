@@ -1403,6 +1403,7 @@ function main() {
     var program = require('commander')
     program.option('--pretty')
         .option('--silent')
+        .option('--include-lib')
     program.parse(process.argv)
 
     var inputs = program.args.map(function(file) {
@@ -1411,6 +1412,12 @@ function main() {
             text: fs.readFileSync(file, 'utf8')
         }
     })
+    if (program.include_lib) {
+        inputs.unshift({
+            file: ">lib.d.ts",
+            text: fs.readFileSync(__dirname + '/lib/lib.d.ts', 'utf8')
+        })
+    }
     var json = convert(inputs)
     if (program.silent)
         {}
