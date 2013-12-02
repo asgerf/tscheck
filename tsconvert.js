@@ -322,20 +322,24 @@ function parseExternModule(node) {
     }
 }
 
+var enum_types = new Map;
 function parseEnum(node, objectType, host) {
 	current_node = node;
 	var qname = qualify(host, node.name.text())
 	var enumType = new TEnum(qname)
+    var enumMembers = [];
 	// var objectType = new TObject(null)
 	node.members.members.forEach(function (member) {
 		if (member instanceof TypeScript.VariableStatement) {
 			member.declaration.declarators.members.forEach(function (decl) {
 				objectType.setMember(decl.id.text(), enumType)
+                enumMembers.push(qualify(qname, decl.id.text()));
 			})
 		} else {
 			throw new TypeError("Unexpected enum member: " + member.constructor.name)
 		}
 	})
+    enum_types.put(qname, enumMembers);
 	return {
 		enum: enumType,
 		object: objectType
@@ -1350,7 +1354,8 @@ function outputPhase() {
     return {
         global: "<global>",
         env: type_env.mapv(outputTypeDef).json(),
-        externs: extern_types.mapv(outputExtern).json()
+        externs: extern_types.mapv(outputExtern).json(),
+        enums: enum_types.json(),
     }
 }
 
@@ -1390,6 +1395,7 @@ function convert(arg) {
     extern_types = null;
     current_scope = null;
     current_node = null;
+    enum_types = null;
 
     return json;
 }
@@ -1403,7 +1409,7 @@ function main() {
     var program = require('commander')
     program.option('--pretty')
         .option('--silent')
-        .option('--include-lib')
+        .option('--lib')
     program.parse(process.argv)
 
     var inputs = program.args.map(function(file) {
@@ -1412,7 +1418,7 @@ function main() {
             text: fs.readFileSync(file, 'utf8')
         }
     })
-    if (program.include_lib) {
+    if (program.lib) {
         inputs.unshift({
             file: ">lib.d.ts",
             text: fs.readFileSync(__dirname + '/lib/lib.d.ts', 'utf8')

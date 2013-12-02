@@ -277,13 +277,47 @@ function canonicalizeType(type) {
 }
 
 // ------------------------------------------------------------
+// 		 Determine Enum Values
+// ------------------------------------------------------------
+
+var enum_values = new Map;
+function determineEnums() {
+	for (var qname in typeDecl.enums) {
+		var paths = typeDecl.enums[qname];
+		var valueBag = [];
+		paths.forEach(function(path) {
+			var value = {key: snapshot.global};
+			var pathElems = path.split('.');
+			for (var i=0; i<pathElems.length; i++) {
+				var elem = pathElems[i];
+				if (typeof value !== 'object') {
+					console.log("Enum " + qname + " is missing its value " + path)
+					return;
+				}
+				var obj = lookupObject(value.key);
+				var prty = findPrty(obj, elem);
+				if (!prty || !("value" in prty)) {
+					console.log("Enum " + qname + " is missing its value " + path)
+					return;	
+				}
+				value = prty.value;
+			}
+			valueBag.push(value)
+		});
+		enum_values.put(qname, valueBag);
+	}
+}
+determineEnums();
+
+
+// ------------------------------------------------------------
 // 		 Recursive check of Value vs Type
 // ------------------------------------------------------------
 
 var assumptions = {}
 function check(type, value, path, userPath) {
-	function reportError(msg, optPath) {
-		if (!userPath)
+	function reportError(msg, optPath, optUserPath) {
+		if (!userPath && !optUserPath)
 			return;
 		var optPath = optPath || path;
 		console.log((optPath || '<global>') + ": " + msg)
@@ -301,7 +335,7 @@ function check(type, value, path, userPath) {
 	}
 	switch (type.type) {
 		case 'object':
-			if (must(typeof value === 'object')) {
+			if (must(typeof value === 'object' && value !== null)) {
 				var obj = lookupObject(value.key)
 				if (checkCyclicPrototype(value.key)) {
 					reportError("Cyclic prototype chain");
@@ -314,10 +348,10 @@ function check(type, value, path, userPath) {
 					var objPrty = findPrty(obj, k)
 					if (!objPrty) {
 						if (!typePrty.optional && isUserPath) {
-							reportError("expected " + formatType(typePrty.type) + " but found nothing", qualify(path,k))
+							reportError("expected " + formatType(typePrty.type) + " but found nothing", qualify(path,k), isUserPath)
 						}
 					} else {
-						if (objPrty.value) {
+						if ('value' in objPrty) {
 							check(typePrty.type, objPrty.value, qualify(path,k), isUserPath)
 						} else {
 							// todo: getters and setters require static analysis
@@ -341,7 +375,7 @@ function check(type, value, path, userPath) {
 			check(objectType, value, path, userPath)
 			break;
 		case 'enum':
-			must(typeof value === 'number')
+			must(enum_values.get(type.name).some(function(x) { return x === value }));
 			break;
 		case 'string-const':
 			must(typeof value === 'string' && value === type.value)
