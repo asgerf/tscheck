@@ -413,8 +413,13 @@ check(lookupQType(typeDecl.global,[]), {key: snapshot.global}, '', false);
 function formatTypeProperty(name,prty) {
 	return name + (prty.optional ? '?' : '') + ': ' + formatType(prty.type)
 }
+function formatTypeParameter(tparam) {
+	return tparam.name;
+}
 function formatTypeCall(call) {
-	return '(' + call.parameters.map(formatParameter).join(', ') + ') => ' + formatType(call.returnType)
+	var newstr = call.new ? 'new' : '';
+	var tparams = call.typeParameters.length === 0 ? '' : ('<' + call.typeParameters.map(formatTypeParameter).join(',') + '>')
+	return newstr + tparams + '(' + call.parameters.map(formatParameter).join(', ') + ') => ' + formatType(call.returnType)
 }
 function formatParameter(param) {
 	return param.name + (param.optional ? '?' : '') + ':' + formatType(param.type)
@@ -435,6 +440,8 @@ function formatType(type) {
 				return type.name + '<' + type.typeArguments.map(formatType).join(', ') + '>'
 			else
 				return type.name;
+		case 'type-param':
+			return type.name;
 		case 'string':
 			return 'string';
 		case 'number':
