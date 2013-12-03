@@ -1,0 +1,162 @@
+THREE.CullFaceBack: expected THREE.CullFace but found value 1
+THREE.CullFaceFront: expected THREE.CullFace but found value 2
+THREE.CullFaceFrontBack: expected THREE.CullFace but found value 3
+THREE.FrontFaceDirectionCCW: expected THREE.FrontFaceDirection but found value 1
+THREE.PCFShadowMap: expected THREE.ShadowMapType but found value 1
+THREE.PCFSoftShadowMap: expected THREE.ShadowMapType but found value 2
+THREE.BackSide: expected THREE.Side but found value 1
+THREE.DoubleSide: expected THREE.Side but found value 2
+THREE.FlatShading: expected THREE.Shading but found value 1
+THREE.SmoothShading: expected THREE.Shading but found value 2
+THREE.FaceColors: expected THREE.Colors but found value 1
+THREE.VertexColors: expected THREE.Colors but found value 2
+THREE.NormalBlending: expected THREE.Blending but found value 1
+THREE.AdditiveBlending: expected THREE.Blending but found value 2
+THREE.SubtractiveBlending: expected THREE.Blending but found value 3
+THREE.MultiplyBlending: expected THREE.Blending but found value 4
+THREE.CustomBlending: expected THREE.Blending but found value 5
+THREE.AddEquation: expected THREE.BlendingEquation but found value 100
+THREE.SubtractEquation: expected THREE.BlendingEquation but found value 101
+THREE.ReverseSubtractEquation: expected THREE.BlendingEquation but found value 102
+THREE.ZeroFactor: expected THREE.BlendingDstFactor but found value 200
+THREE.OneFactor: expected THREE.BlendingDstFactor but found value 201
+THREE.SrcColorFactor: expected THREE.BlendingDstFactor but found value 202
+THREE.OneMinusSrcColorFactor: expected THREE.BlendingDstFactor but found value 203
+THREE.SrcAlphaFactor: expected THREE.BlendingDstFactor but found value 204
+THREE.OneMinusSrcAlphaFactor: expected THREE.BlendingDstFactor but found value 205
+THREE.DstAlphaFactor: expected THREE.BlendingDstFactor but found value 206
+THREE.OneMinusDstAlphaFactor: expected THREE.BlendingDstFactor but found value 207
+THREE.DstColorFactor: expected THREE.BlendingSrcFactor but found value 208
+THREE.OneMinusDstColorFactor: expected THREE.BlendingSrcFactor but found value 209
+THREE.SrcAlphaSaturateFactor: expected THREE.BlendingSrcFactor but found value 210
+THREE.MixOperation: expected THREE.Combine but found value 1
+THREE.AddOperation: expected THREE.Combine but found value 2
+THREE.UVMapping: expected THREE.Mapping but found value { arguments: undefined, caller: undefined, length: undefined, name: undefined, prototype: [Object] }
+THREE.CubeReflectionMapping: expected THREE.Mapping but found value { arguments: undefined, caller: undefined, length: undefined, name: undefined, prototype: [Object] }
+THREE.CubeRefractionMapping: expected THREE.Mapping but found value { arguments: undefined, caller: undefined, length: undefined, name: undefined, prototype: [Object] }
+THREE.SphericalReflectionMapping: expected THREE.Mapping but found value { arguments: undefined, caller: undefined, length: undefined, name: undefined, prototype: [Object] }
+THREE.SphericalRefractionMapping: expected THREE.Mapping but found value { arguments: undefined, caller: undefined, length: undefined, name: undefined, prototype: [Object] }
+THREE.RepeatWrapping: expected THREE.Wrapping but found value 1000
+THREE.ClampToEdgeWrapping: expected THREE.Wrapping but found value 1001
+THREE.MirroredRepeatWrapping: expected THREE.Wrapping but found value 1002
+THREE.NearestFilter: expected THREE.TextureFilter but found value 1003
+THREE.NearestMipMapNearestFilter: expected THREE.TextureFilter but found value 1004
+THREE.NearestMipMapLinearFilter: expected THREE.TextureFilter but found value 1005
+THREE.LinearFilter: expected THREE.TextureFilter but found value 1006
+THREE.LinearMipMapNearestFilter: expected THREE.TextureFilter but found value 1007
+THREE.LinearMipMapLinearFilter: expected THREE.TextureFilter but found value 1008
+THREE.UnsignedByteType: expected THREE.TextureDataType but found value 1009
+THREE.ByteType: expected THREE.TextureDataType but found value 1010
+THREE.ShortType: expected THREE.TextureDataType but found value 1011
+THREE.UnsignedShortType: expected THREE.TextureDataType but found value 1012
+THREE.IntType: expected THREE.TextureDataType but found value 1013
+THREE.UnsignedIntType: expected THREE.TextureDataType but found value 1014
+THREE.FloatType: expected THREE.TextureDataType but found value 1015
+THREE.UnsignedShort4444Type: expected THREE.PixelType but found value 1016
+THREE.UnsignedShort5551Type: expected THREE.PixelType but found value 1017
+THREE.UnsignedShort565Type: expected THREE.PixelType but found value 1018
+THREE.AlphaFormat: expected THREE.PixelFormat but found value 1019
+THREE.RGBFormat: expected THREE.PixelFormat but found value 1020
+THREE.RGBAFormat: expected THREE.PixelFormat but found value 1021
+THREE.LuminanceFormat: expected THREE.PixelFormat but found value 1022
+THREE.LuminanceAlphaFormat: expected THREE.PixelFormat but found value 1023
+THREE.RGB_S3TC_DXT1_Format: expected THREE.CompressedPixelFormat but found value 2001
+THREE.RGBA_S3TC_DXT1_Format: expected THREE.CompressedPixelFormat but found value 2002
+THREE.RGBA_S3TC_DXT3_Format: expected THREE.CompressedPixelFormat but found value 2003
+THREE.RGBA_S3TC_DXT5_Format: expected THREE.CompressedPixelFormat but found value 2004
+THREE.GeometryLibrary: expected Array<THREE.Geometry> but found nothing
+THREE.Object3DLibrary: expected Array<THREE.Object3D> but found nothing
+THREE.MaterialLibrary: expected Array<THREE.Material> but found nothing
+THREE.TextureLibrary: expected Array<THREE.Texture> but found nothing
+THREE.AnimationHandler.CATMULLROM: expected THREE.AnimationInterpolation but found value 1
+THREE.AnimationHandler.CATMULLROM_FORWARD: expected THREE.AnimationInterpolation but found value 2
+THREE.UniformsLib.common['opacity'].value: expected Object but found value 1
+THREE.UniformsLib.common['flipEnvMap'].value: expected Object but found value -1
+THREE.UniformsLib.common['reflectivity'].value: expected Object but found value 1
+THREE.UniformsLib.common['refractionRatio'].value: expected Object but found value 0.98
+THREE.UniformsLib.bump['bumpScale'].value: expected Object but found value 1
+THREE.UniformsLib.fog['fogDensity'].value: expected Object but found value 0.00025
+THREE.UniformsLib.fog['fogNear'].value: expected Object but found value 1
+THREE.UniformsLib.fog['fogFar'].value: expected Object but found value 2000
+THREE.UniformsLib.particle['opacity'].value: expected Object but found value 1
+THREE.UniformsLib.particle['size'].value: expected Object but found value 1
+THREE.UniformsLib.particle['scale'].value: expected Object but found value 1
+THREE.UniformsLib.particle['fogDensity'].value: expected Object but found value 0.00025
+THREE.UniformsLib.particle['fogNear'].value: expected Object but found value 1
+THREE.UniformsLib.particle['fogFar'].value: expected Object but found value 2000
+THREE.ShaderLib.basic.uniforms['opacity'].value: expected Object but found value 1
+THREE.ShaderLib.basic.uniforms['flipEnvMap'].value: expected Object but found value -1
+THREE.ShaderLib.basic.uniforms['reflectivity'].value: expected Object but found value 1
+THREE.ShaderLib.basic.uniforms['refractionRatio'].value: expected Object but found value 0.98
+THREE.ShaderLib.basic.uniforms['fogDensity'].value: expected Object but found value 0.00025
+THREE.ShaderLib.basic.uniforms['fogNear'].value: expected Object but found value 1
+THREE.ShaderLib.basic.uniforms['fogFar'].value: expected Object but found value 2000
+THREE.ShaderLib.lambert.uniforms['opacity'].value: expected Object but found value 1
+THREE.ShaderLib.lambert.uniforms['flipEnvMap'].value: expected Object but found value -1
+THREE.ShaderLib.lambert.uniforms['reflectivity'].value: expected Object but found value 1
+THREE.ShaderLib.lambert.uniforms['refractionRatio'].value: expected Object but found value 0.98
+THREE.ShaderLib.lambert.uniforms['fogDensity'].value: expected Object but found value 0.00025
+THREE.ShaderLib.lambert.uniforms['fogNear'].value: expected Object but found value 1
+THREE.ShaderLib.lambert.uniforms['fogFar'].value: expected Object but found value 2000
+THREE.ShaderLib.phong.uniforms['opacity'].value: expected Object but found value 1
+THREE.ShaderLib.phong.uniforms['flipEnvMap'].value: expected Object but found value -1
+THREE.ShaderLib.phong.uniforms['reflectivity'].value: expected Object but found value 1
+THREE.ShaderLib.phong.uniforms['refractionRatio'].value: expected Object but found value 0.98
+THREE.ShaderLib.phong.uniforms['bumpScale'].value: expected Object but found value 1
+THREE.ShaderLib.phong.uniforms['fogDensity'].value: expected Object but found value 0.00025
+THREE.ShaderLib.phong.uniforms['fogNear'].value: expected Object but found value 1
+THREE.ShaderLib.phong.uniforms['fogFar'].value: expected Object but found value 2000
+THREE.ShaderLib.phong.uniforms['shininess'].value: expected Object but found value 30
+THREE.ShaderLib.particle_basic.uniforms['opacity'].value: expected Object but found value 1
+THREE.ShaderLib.particle_basic.uniforms['size'].value: expected Object but found value 1
+THREE.ShaderLib.particle_basic.uniforms['scale'].value: expected Object but found value 1
+THREE.ShaderLib.particle_basic.uniforms['fogDensity'].value: expected Object but found value 0.00025
+THREE.ShaderLib.particle_basic.uniforms['fogNear'].value: expected Object but found value 1
+THREE.ShaderLib.particle_basic.uniforms['fogFar'].value: expected Object but found value 2000
+THREE.ShaderLib.depth.uniforms['mNear'].value: expected Object but found value 1
+THREE.ShaderLib.depth.uniforms['mFar'].value: expected Object but found value 2000
+THREE.ShaderLib.depth.uniforms['opacity'].value: expected Object but found value 1
+THREE.ShaderLib.dashed.uniforms['opacity'].value: expected Object but found value 1
+THREE.ShaderLib.dashed.uniforms['flipEnvMap'].value: expected Object but found value -1
+THREE.ShaderLib.dashed.uniforms['reflectivity'].value: expected Object but found value 1
+THREE.ShaderLib.dashed.uniforms['refractionRatio'].value: expected Object but found value 0.98
+THREE.ShaderLib.dashed.uniforms['fogDensity'].value: expected Object but found value 0.00025
+THREE.ShaderLib.dashed.uniforms['fogNear'].value: expected Object but found value 1
+THREE.ShaderLib.dashed.uniforms['fogFar'].value: expected Object but found value 2000
+THREE.ShaderLib.dashed.uniforms['scale'].value: expected Object but found value 1
+THREE.ShaderLib.dashed.uniforms['dashSize'].value: expected Object but found value 1
+THREE.ShaderLib.dashed.uniforms['totalSize'].value: expected Object but found value 2
+THREE.ShaderLib.normal.uniforms['opacity'].value: expected Object but found value 1
+THREE.ShaderLib.normalmap.uniforms['fogDensity'].value: expected Object but found value 0.00025
+THREE.ShaderLib.normalmap.uniforms['fogNear'].value: expected Object but found value 1
+THREE.ShaderLib.normalmap.uniforms['fogFar'].value: expected Object but found value 2000
+THREE.ShaderLib.normalmap.uniforms['uDisplacementScale'].value: expected Object but found value 1
+THREE.ShaderLib.normalmap.uniforms['uShininess'].value: expected Object but found value 30
+THREE.ShaderLib.normalmap.uniforms['uOpacity'].value: expected Object but found value 1
+THREE.ShaderLib.normalmap.uniforms['uRefractionRatio'].value: expected Object but found value 0.98
+THREE.ShaderLib.normalmap.uniforms['uReflectivity'].value: expected Object but found value 0.5
+THREE.ShaderLib.cube.uniforms['tFlip'].value: expected Object but found value -1
+THREE.CullFace: expected {} but found nothing
+THREE.FrontFaceDirection: expected {} but found nothing
+THREE.ShadowMapType: expected {} but found nothing
+THREE.Side: expected {} but found nothing
+THREE.Shading: expected {} but found nothing
+THREE.Colors: expected {} but found nothing
+THREE.Blending: expected {} but found nothing
+THREE.BlendingEquation: expected {} but found nothing
+THREE.BlendingDstFactor: expected {} but found nothing
+THREE.BlendingSrcFactor: expected {} but found nothing
+THREE.Combine: expected {} but found nothing
+THREE.Mapping: expected {} but found nothing
+THREE.Wrapping: expected {} but found nothing
+THREE.TextureFilter: expected {} but found nothing
+THREE.TextureDataType: expected {} but found nothing
+THREE.PixelType: expected {} but found nothing
+THREE.PixelFormat: expected {} but found nothing
+THREE.CompressedPixelFormat: expected {} but found nothing
+THREE.RenderTarget: expected {new() => THREE.RenderTarget} but found nothing
+THREE.ParticleDOMMaterial: expected {new(element:HTMLElement) => THREE.ParticleDOMMaterial} but found nothing
+THREE.SkinnedMesh.offsetMatrix.elements.get: expected {(index:number) => number} but found nothing
+THREE.WebGLRenderer2: expected {new(parameters?:THREE.WebGLRendererParameters) => THREE.WebGLRenderer2} but found nothing
+THREE.AnimationInterpolation: expected {new() => THREE.AnimationInterpolation} but found nothing
+THREE.AnimationMorphTarget: expected {new(root:THREE.Bone, data:any) => THREE.AnimationMorphTarget} but found nothing

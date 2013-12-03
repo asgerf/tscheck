@@ -1,0 +1,4 @@
+Box2D.Collision.b2OBB: expected {new() => Box2D.Collision.b2OBB} but found nothing [LOW] [FIXABLE]
+Box2D.Collision.Shapes.b2Shape.startsInsideCollide: expected number but found nothing [HIGH] [FIXABLE] [TYPO]
+Box2D.Dynamics.Joints.b2PullyJoint: expected {new() => Box2D.Dynamics.Joints.b2PullyJoint} but found nothing [HIGH] [FIXABLE] [TYPO]
+Box2D.Dynamics.Joints.b2PullyJointDef: expected {new() => Box2D.Dynamics.Joints.b2PullyJointDef} but found nothing [HIGH] [FIXABLE] [TYPO]

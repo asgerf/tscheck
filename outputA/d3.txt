@@ -1,0 +1,52 @@
+d3.time.second.utc.utc: expected D3.Time.Interval but found nothing
+d3.time.minute.utc.utc: expected D3.Time.Interval but found nothing
+d3.time.hour.utc.utc: expected D3.Time.Interval but found nothing
+d3.time.day.utc.utc: expected D3.Time.Interval but found nothing
+d3.time.week.utc.utc: expected D3.Time.Interval but found nothing
+d3.time.monday.utc.utc: expected D3.Time.Interval but found nothing
+d3.time.tuesday.utc.utc: expected D3.Time.Interval but found nothing
+d3.time.wednesday.utc.utc: expected D3.Time.Interval but found nothing
+d3.time.thursday.utc.utc: expected D3.Time.Interval but found nothing
+d3.time.friday.utc.utc: expected D3.Time.Interval but found nothing
+d3.time.saturday.utc.utc: expected D3.Time.Interval but found nothing
+d3.time.month.utc.utc: expected D3.Time.Interval but found nothing
+d3.time.year.utc.utc: expected D3.Time.Interval but found nothing
+d3.scale.theshold: expected {() => D3.Scale.ThresholdScale} but found nothing
+d3.layout.treeMap: expected {() => D3.Layout.TreeMapLayout} but found nothing
+d3.geo.othographic: expected {raw: {() => D3.Geo.Projection}, () => D3.Geo.Projection} but found nothing
+d3.geo.greatArc.distance: expected {() => number} but found nothing
+d3.geo.greatArc.source: expected {() => any, (source:any) => D3.Geo.GreatArc} but found nothing
+d3.geo.greatArc.target: expected {() => any, (target:any) => D3.Geo.GreatArc} but found nothing
+d3.geo.greatArc.precision: expected {() => number, (precision:number) => D3.Geo.GreatArc} but found nothing
+d3.geom.voronoi.x: expected {() => {(d:any) => any}, (accesor:{(d:any) => any}) => any} but found nothing
+d3.geom.voronoi.y: expected {() => {(d:any) => any}, (accesor:{(d:any) => any}) => any} but found nothing
+d3.geom.quadtree.add: expected {(point:D3.Geom.Point) => D3.Geom.Quadtree} but found nothing
+d3.geom.quadtree.visit: expected {(callback:any) => D3.Geom.Quadtree} but found nothing
+d3.geom.quadtree.x: expected {() => {(d:any) => any}, (accesor:{(d:any) => any}) => D3.Geom.Quadtree} but found nothing
+d3.geom.quadtree.y: expected {() => {(d:any) => any}, (accesor:{(d:any) => any}) => D3.Geom.Quadtree} but found nothing
+d3.geom.quadtree.size: expected {(size:Array<number>) => D3.Geom.Quadtree} but found nothing
+d3.geom.polygon.area: expected {() => number} but found nothing
+d3.geom.polygon.centroid: expected {() => Array<number>} but found nothing
+d3.geom.polygon.clip: expected {(subject:D3.Geom.Polygon) => D3.Geom.Polygon} but found nothing
+d3.geom.polygon.concat: expected {<U>(items:Array<U>) => Array<D3.Geom.Vertice>, (items:Array<D3.Geom.Vertice>) => Array<D3.Geom.Vertice>} but found nothing
+d3.geom.polygon.join: expected {(separator?:string) => string} but found nothing
+d3.geom.polygon.pop: expected {() => D3.Geom.Vertice} but found nothing
+d3.geom.polygon.push: expected {(items:Array<D3.Geom.Vertice>) => number} but found nothing
+d3.geom.polygon.reverse: expected {() => Array<D3.Geom.Vertice>} but found nothing
+d3.geom.polygon.shift: expected {() => D3.Geom.Vertice} but found nothing
+d3.geom.polygon.slice: expected {(start:number, end?:number) => Array<D3.Geom.Vertice>} but found nothing
+d3.geom.polygon.sort: expected {(compareFn?:{(a:D3.Geom.Vertice, b:D3.Geom.Vertice) => number}) => Array<D3.Geom.Vertice>} but found nothing
+d3.geom.polygon.splice: expected {(start:number) => Array<D3.Geom.Vertice>, (start:number, deleteCount:number, items:Array<D3.Geom.Vertice>) => Array<D3.Geom.Vertice>} but found nothing
+d3.geom.polygon.unshift: expected {(items:Array<D3.Geom.Vertice>) => number} but found nothing
+d3.geom.polygon.indexOf: expected {(searchElement:D3.Geom.Vertice, fromIndex?:number) => number} but found nothing
+d3.geom.polygon.lastIndexOf: expected {(searchElement:D3.Geom.Vertice, fromIndex?:number) => number} but found nothing
+d3.geom.polygon.every: expected {(callbackfn:{(value:D3.Geom.Vertice, index:number, array:Array<D3.Geom.Vertice>) => boolean}, thisArg?:any) => boolean} but found nothing
+d3.geom.polygon.some: expected {(callbackfn:{(value:D3.Geom.Vertice, index:number, array:Array<D3.Geom.Vertice>) => boolean}, thisArg?:any) => boolean} but found nothing
+d3.geom.polygon.forEach: expected {(callbackfn:{(value:D3.Geom.Vertice, index:number, array:Array<D3.Geom.Vertice>) => void}, thisArg?:any) => void} but found nothing
+d3.geom.polygon.map: expected {<U>(callbackfn:{(value:D3.Geom.Vertice, index:number, array:Array<D3.Geom.Vertice>) => U}, thisArg?:any) => Array<U>} but found nothing
+d3.geom.polygon.filter: expected {(callbackfn:{(value:D3.Geom.Vertice, index:number, array:Array<D3.Geom.Vertice>) => boolean}, thisArg?:any) => Array<D3.Geom.Vertice>} but found nothing
+d3.geom.polygon.reduce: expected {(callbackfn:{(previousValue:D3.Geom.Vertice, currentValue:D3.Geom.Vertice, currentIndex:number, array:Array<D3.Geom.Vertice>) => D3.Geom.Vertice}, initialValue?:D3.Geom.Vertice) => D3.Geom.Vertice, <U>(callbackfn:{(previousValue:U, currentValue:D3.Geom.Vertice, currentIndex:number, array:Array<D3.Geom.Vertice>) => U}, initialValue:U) => U} but found nothing
+d3.geom.polygon.reduceRight: expected {(callbackfn:{(previousValue:D3.Geom.Vertice, currentValue:D3.Geom.Vertice, currentIndex:number, array:Array<D3.Geom.Vertice>) => D3.Geom.Vertice}, initialValue?:D3.Geom.Vertice) => D3.Geom.Vertice, <U>(callbackfn:{(previousValue:U, currentValue:D3.Geom.Vertice, currentIndex:number, array:Array<D3.Geom.Vertice>) => U}, initialValue:U) => U} but found nothing
+d3.geom.hull.x: expected {() => {(d:any) => any}, (accesor:{(d:any) => any}) => any} but found nothing
+d3.geom.hull.y: expected {() => {(d:any) => any}, (accesor:{(d:any) => any}) => any} but found nothing
+D3: expected module:D3 but found nothing

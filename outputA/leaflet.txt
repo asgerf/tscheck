@@ -1,0 +1,14 @@
+L_PREFER_CANVAS: expected boolean but found nothing
+L_NO_TOUCH: expected boolean but found nothing
+L_DISABLE_3D: expected boolean but found nothing
+L.WMS: expected {new(baseUrl:string, options:L.WMSOptions) => L.WMS} but found nothing
+L.Canvas: expected {new(options?:L.TileLayerOptions) => L.Canvas} but found nothing
+L.Path.VML: expected boolean but found nothing
+L.Path.CANVAS: expected boolean but found nothing
+L.GeoJSON.coordsToLatlng: expected {(coords:Array<number>, reverse?:boolean) => L.LatLng} but found nothing
+L.GeoJSON.coordsToLatlngs: expected {(coords:Array<number>, levelsDeep?:number, reverse?:boolean) => Array<L.LatLng>} but found nothing
+L.Zoom: expected {new(options?:L.ZoomOptions) => L.Zoom} but found nothing
+L.Attribution: expected {new(options?:L.AttributionOptions) => L.Attribution} but found nothing
+L.Layers: expected {new(baseLayers?:any, overlays?:any, options?:L.LayersOptions) => L.Layers} but found nothing
+L.Scale: expected {new(options?:L.ScaleOptions) => L.Scale} but found nothing
+L.CRS.Simple.code: expected string but found nothing

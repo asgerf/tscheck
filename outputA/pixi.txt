@@ -1,0 +1,3 @@
+PIXI.gl: expected WebGLRenderingContext but found nothing
+PIXI.MaskFilter: expected {(graphics:PIXI.Graphics) => void} but found nothing
+PIXI.DisplayObject.autoDetectRenderer: expected {(width:number, height:number, view?:HTMLCanvasElement, transparent?:boolean) => PIXI.IPixiRenderer} but found nothing
