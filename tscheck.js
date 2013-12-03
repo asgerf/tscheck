@@ -213,6 +213,10 @@ function escapeStringConst(str) {
 }
 function canonicalizeCall(call) {
 	var buf = []
+	if (call.new)
+		buf.push('+new')
+	if (call.variadic)
+		buf.push('+var')
 	buf.push('<')
 	call.typeParameters.forEach(function(tp) {
 		buf.push(tp.name)
@@ -309,10 +313,38 @@ function determineEnums() {
 }
 determineEnums();
 
+// ------------------------------------------------------------
+// 		 Index Properties
+// ------------------------------------------------------------
+
+function indexProperties(obj) {
+	if (!obj)
+		return;
+	if (obj.propertyMap)
+		return;
+	obj.propertyMap = new Map;
+	obj.properties.forEach(function(prty) {
+		obj.propertyMap.put(prty.name, prty);
+	})
+	if (!obj.prototype)
+		return;
+	var parent = lookupObject(obj.prototype.key);
+	indexProperties(parent)
+	parent.propertyMap.forEach(function(name,prty) {
+		if (!obj.propertyMap.has(name)) {
+			obj.propertyMap.put(name,prty);
+		}
+	})
+}
+snapshot.heap.forEach(indexProperties);
 
 // ------------------------------------------------------------
 // 		 Recursive check of Value vs Type
 // ------------------------------------------------------------
+
+function isNumberString(x) {
+	return x === String(Math.floor(Number(x)))
+}
 
 var assumptions = {}
 function check(type, value, path, userPath) {
@@ -345,7 +377,7 @@ function check(type, value, path, userPath) {
 					var typePrty = type.properties[k]
 					var isUserPrty = typePrty.origin != LIB_ORIGIN;
 					var isUserPath = userPath || isUserPrty;
-					var objPrty = findPrty(obj, k)
+					var objPrty = obj.propertyMap.get(k) //findPrty(obj, k)
 					if (!objPrty) {
 						if (!typePrty.optional && isUserPath) {
 							reportError("expected " + formatType(typePrty.type) + " but found nothing", qualify(path,k), isUserPath)
@@ -357,6 +389,20 @@ function check(type, value, path, userPath) {
 							// todo: getters and setters require static analysis
 						}
 					}
+				}
+				if (type.stringIndexer && type.stringIndexer.type !== 'any') {
+					obj.propertyMap.forEach(function(name,objPrty) {
+						if (objPrty.enumerable && 'value' in objPrty) {
+							check(type.stringIndexer, objPrty.value, path + '[\'' + name + '\']', userPath)
+						}
+					})
+				}
+				if (type.numberIndexer && type.numberIndexer.type !== 'any') {
+					obj.propertyMap.forEach(function(name,objPrty) {
+						if (objPrty.enumerable && isNumberString(name) && 'value' in objPrty) {
+							check(type.numberIndexer, objPrty.value, path + '[\'' + name + '\']', userPath)
+						}
+					})
 				}
 			}
 			break;
