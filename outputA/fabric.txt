@@ -1,1 +1,1 @@
-fabric.createCanvasForNode: expected {(width:number, height:number) => fabric.ICanvas} but found nothing
+fabric.createCanvasForNode: expected {(width:number, height:number) => fabric.ICanvas} but found nothing [PLATFORM] [?]
