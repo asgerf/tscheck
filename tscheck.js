@@ -281,39 +281,6 @@ function canonicalizeType(type) {
 }
 
 // ------------------------------------------------------------
-// 		 Determine Enum Values
-// ------------------------------------------------------------
-
-var enum_values = new Map;
-function determineEnums() {
-	for (var qname in typeDecl.enums) {
-		var paths = typeDecl.enums[qname];
-		var valueBag = [];
-		paths.forEach(function(path) {
-			var value = {key: snapshot.global};
-			var pathElems = path.split('.');
-			for (var i=0; i<pathElems.length; i++) {
-				var elem = pathElems[i];
-				if (typeof value !== 'object') {
-					console.log("Enum " + qname + " is missing its value " + path)
-					return;
-				}
-				var obj = lookupObject(value.key);
-				var prty = findPrty(obj, elem);
-				if (!prty || !("value" in prty)) {
-					console.log("Enum " + qname + " is missing its value " + path)
-					return;	
-				}
-				value = prty.value;
-			}
-			valueBag.push(value)
-		});
-		enum_values.put(qname, valueBag);
-	}
-}
-determineEnums();
-
-// ------------------------------------------------------------
 // 		 Index Properties
 // ------------------------------------------------------------
 
@@ -337,6 +304,59 @@ function indexProperties(obj) {
 	})
 }
 snapshot.heap.forEach(indexProperties);
+
+function lookupPath(path, e) {
+	e = e || function() { throw new Error("Missing valeu at " + path) }
+	var value = {key: snapshot.global}
+	var toks = path.split('.')
+	for (var i=0; i<toks.length; i++) {
+		var tok = toks[i];
+		if (typeof value !== 'object') {
+			return e(path);
+		}
+		var obj = lookupObject(value.key);
+		var prty = obj.propertyMap.get(tok);
+		if (!prty || !('value' in prty)) {
+			return e(path);
+		}
+		value = prty.value;
+	}
+	return value;
+}
+
+// ------------------------------------------------------------
+// 		 Determine Enum Values
+// ------------------------------------------------------------
+
+var enum_values = new Map;
+function determineEnums() {
+	for (var qname in typeDecl.enums) {
+		var paths = typeDecl.enums[qname];
+		var values = paths.map(lookupPath.fill(undefined, function(path) {
+			console.log("Enum " + qname + " is missing value " + path)
+			return null;
+		}));
+		enum_values.put(qname, values);
+	}
+}
+determineEnums();
+
+// ------------------------------------------------------------
+// 		 ToObject Coercion
+// ------------------------------------------------------------
+
+var NumberPrototype = lookupPath("Number.prototype");
+var StringPrototype = lookupPath("String.prototype");
+var BooleanPrototype = lookupPath("Boolean.prototype");
+
+function coerceToObject(x) {
+	switch (typeof x) {
+		case 'number': return NumberPrototype;
+		case 'string': return StringPrototype;
+		case 'boolean': return BooleanPrototype;
+		default: return x;
+	}
+}
 
 // ------------------------------------------------------------
 // 		 Recursive check of Value vs Type
@@ -367,6 +387,7 @@ function check(type, value, path, userPath) {
 	}
 	switch (type.type) {
 		case 'object':
+			value = coerceToObject(value);
 			if (must(typeof value === 'object' && value !== null)) {
 				var obj = lookupObject(value.key)
 				if (checkCyclicPrototype(value.key)) {
@@ -400,13 +421,14 @@ function check(type, value, path, userPath) {
 				if (type.numberIndexer && type.numberIndexer.type !== 'any') {
 					obj.propertyMap.forEach(function(name,objPrty) {
 						if (objPrty.enumerable && isNumberString(name) && 'value' in objPrty) {
-							check(type.numberIndexer, objPrty.value, path + '[\'' + name + '\']', userPath)
+							check(type.numberIndexer, objPrty.value, path + '[' + name + ']', userPath)
 						}
 					})
 				}
 			}
 			break;
 		case 'reference':
+			value = coerceToObject(value)
 			if (value === null)
 				return; // null matches any object type
 			if (!must(typeof value === 'object'))
@@ -421,7 +443,12 @@ function check(type, value, path, userPath) {
 			check(objectType, value, path, userPath)
 			break;
 		case 'enum':
-			must(enum_values.get(type.name).some(function(x) { return x === value }));
+			var vals = enum_values.get(type.name);
+			if (vals.length === 0) {
+				must(typeof value !== 'undefined');
+			} else {
+				must(vals.some(function(x) { return x === value }));
+			}
 			break;
 		case 'string-const':
 			must(typeof value === 'string' && value === type.value)
