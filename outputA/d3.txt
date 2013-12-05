@@ -1,17 +1,17 @@
-d3.time.second.utc.utc: expected D3.Time.Interval but found nothing
-d3.time.minute.utc.utc: expected D3.Time.Interval but found nothing
-d3.time.hour.utc.utc: expected D3.Time.Interval but found nothing
-d3.time.day.utc.utc: expected D3.Time.Interval but found nothing
-d3.time.week.utc.utc: expected D3.Time.Interval but found nothing
-d3.time.monday.utc.utc: expected D3.Time.Interval but found nothing
-d3.time.tuesday.utc.utc: expected D3.Time.Interval but found nothing
-d3.time.wednesday.utc.utc: expected D3.Time.Interval but found nothing
-d3.time.thursday.utc.utc: expected D3.Time.Interval but found nothing
-d3.time.friday.utc.utc: expected D3.Time.Interval but found nothing
-d3.time.saturday.utc.utc: expected D3.Time.Interval but found nothing
-d3.time.month.utc.utc: expected D3.Time.Interval but found nothing
-d3.time.year.utc.utc: expected D3.Time.Interval but found nothing
-d3.scale.theshold: expected {() => D3.Scale.ThresholdScale} but found nothing
+d3.time.second.utc.utc: expected D3.Time.Interval but found nothing [LOW] [FIXABLE]
+d3.time.minute.utc.utc: expected D3.Time.Interval but found nothing [LOW] [FIXABLE]
+d3.time.hour.utc.utc: expected D3.Time.Interval but found nothing [LOW] [FIXABLE]
+d3.time.day.utc.utc: expected D3.Time.Interval but found nothing [LOW] [FIXABLE]
+d3.time.week.utc.utc: expected D3.Time.Interval but found nothing [LOW] [FIXABLE]
+d3.time.monday.utc.utc: expected D3.Time.Interval but found nothing [LOW] [FIXABLE]
+d3.time.tuesday.utc.utc: expected D3.Time.Interval but found nothing [LOW] [FIXABLE]
+d3.time.wednesday.utc.utc: expected D3.Time.Interval but found nothing [LOW] [FIXABLE]
+d3.time.thursday.utc.utc: expected D3.Time.Interval but found nothing [LOW] [FIXABLE]
+d3.time.friday.utc.utc: expected D3.Time.Interval but found nothing [LOW] [FIXABLE]
+d3.time.saturday.utc.utc: expected D3.Time.Interval but found nothing [LOW] [FIXABLE]
+d3.time.month.utc.utc: expected D3.Time.Interval but found nothing [LOW] [FIXABLE]
+d3.time.year.utc.utc: expected D3.Time.Interval but found nothing [LOW] [FIXABLE]
+d3.scale.theshold: expected {() => D3.Scale.ThresholdScale} but found nothing [HIGH] [FIXABLE] [TYPO]
 d3.layout.treeMap: expected {() => D3.Layout.TreeMapLayout} but found nothing
 d3.geo.othographic: expected {raw: {() => D3.Geo.Projection}, () => D3.Geo.Projection} but found nothing
 d3.geo.greatArc.distance: expected {() => number} but found nothing
