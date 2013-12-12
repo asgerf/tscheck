@@ -96,6 +96,15 @@ Map.prototype.push = function(key, val) {
     }
     this[key].push(val);
 };
+Map.prototype.increment = function(key, val) {
+    key = '$' + key
+    if (!this[key]) {
+        this[key] = 0;
+    }
+    if (typeof val === 'undefined')
+        val = 1;
+    this[key] += val;
+};
 Map.groupBy = function(list, item2key) {
     if (typeof item2key === 'string') {
         var prty = item2key;

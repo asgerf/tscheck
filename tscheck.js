@@ -40,7 +40,11 @@ function reportUniqueError(uid, msg) {
 
 
 function qualify(host, name) {
-	return host === '' ? name : (host + '.' + name);
+	if (host === '')
+		return name;
+	if (host.startsWith('module:'))
+		return host.substring('module:'.length) + '::' + name;
+	return host + '.' + name;
 }
 
 function jsonMap(obj,fn) {
@@ -118,6 +122,50 @@ function checkCyclicPrototype(key) {
 	}
 }
 
+// ---------------------------------
+// 		 Name Type Expressions
+// ---------------------------------
+
+var tpath2type = new Map;
+function nameType(type, tpath) {
+	switch (type.type) {
+		case 'object':
+			type.path = tpath;
+			tpath2type.put(tpath, type);
+			for (var k in type.properties) {
+				var typePrty = type.properties[k]
+				nameType(typePrty.type, qualify(tpath, k))
+			}
+			if (type.numberIndexer) {
+				nameType(type.numberIndexer, qualify(tpath, '[number]'))
+			}
+			if (type.stringIndexer) {
+				nameType(type.stringIndexer, qualify(tpath, '[string]'))
+			}
+			type.calls.forEach(function(call,i) {
+				call.typeParameters.forEach(function(tp,j) {
+					tp.constraint && nameType(tp.constraint, qualify(tpath, 'call:' + i + 'bound:' + j))
+				})
+				call.parameters.forEach(function(parm,j) {
+					nameType(parm.type, qualify(tpath, 'call:' + i + 'arg:' + j))
+				})
+				nameType(call.returnType, qualify(tpath, 'call:' + i + ':return'))
+			})
+			break;
+		case 'reference':
+			type.typeArguments.forEach(function(targ,i) {
+				nameType(targ, qualify(tpath, 'typearg:' + i))
+			})
+			break;
+	}
+}
+function nameAllTypes() {
+	for (var k in typeDecl.env) {
+		nameType(typeDecl.env[k].object, k)
+	}	
+}
+nameAllTypes()
+
 // ----------------------------------------------
 // 		 Type Parameter Substitution
 // ----------------------------------------------
@@ -171,7 +219,7 @@ function substType(type, tenv) {
 		if (t)
 			return t;
 		else
-			return type; // this can happen when type params are shadowed by function type params (I think)
+			return type; // this happens for function type params
 	case 'object':
 		return {
 			type: 'object',
@@ -179,7 +227,8 @@ function substType(type, tenv) {
 			properties: jsonMap(type.properties, substPrty.fill(undefined,tenv)),
 			calls: type.calls.map(substCall.fill(undefined,tenv)),
 			stringIndexer: type.stringIndexer && substType(type.stringIndexer, tenv),
-			numberIndexer: type.numberIndexer && substType(type.numberIndexer, tenv)
+			numberIndexer: type.numberIndexer && substType(type.numberIndexer, tenv),
+			path: type.path
 		}
 		break;
 	case 'reference':
@@ -348,6 +397,7 @@ determineEnums();
 var NumberPrototype = lookupPath("Number.prototype");
 var StringPrototype = lookupPath("String.prototype");
 var BooleanPrototype = lookupPath("Boolean.prototype");
+var FunctionPrototype = lookupPath("Function.prototype");
 
 function coerceToObject(x) {
 	switch (typeof x) {
@@ -358,6 +408,8 @@ function coerceToObject(x) {
 	}
 }
 
+
+
 // ------------------------------------------------------------
 // 		 Recursive check of Value vs Type
 // ------------------------------------------------------------
@@ -366,6 +418,8 @@ function isNumberString(x) {
 	return x === String(Math.floor(Number(x)))
 }
 
+var tpath2values = new Map;
+var native_tpaths = new Map;
 var assumptions = {}
 function check(type, value, path, userPath) {
 	function reportError(msg, optPath, optUserPath) {
@@ -385,10 +439,20 @@ function check(type, value, path, userPath) {
 	if (!type) {
 		throw new Error("Undefined type on path: " + path)
 	}
+	if (value === null) {
+		return; // null satisfies all types
+	}
 	switch (type.type) {
 		case 'object':
+			if (!type.path) {
+				console.log("Missing type path at value " + path)
+			}
+			tpath2values.push(type.path, value)
+			if (!userPath) {
+				native_tpaths.put(type.path, true)
+			}
 			value = coerceToObject(value);
-			if (must(typeof value === 'object' && value !== null)) {
+			if (must(typeof value === 'object')) {
 				var obj = lookupObject(value.key)
 				if (checkCyclicPrototype(value.key)) {
 					reportError("Cyclic prototype chain");
@@ -465,7 +529,8 @@ function check(type, value, path, userPath) {
 		case 'any':
 			break; // no check necessary
 		case 'void':
-			break; // ?
+			must(typeof value === 'undefined');
+			break;
 		case 'type-param':
 			// should be replaced by substType before we get here
 			throw new Error("Checking value " + formatValue(value) + " against unbound type parameter " + type.name);
@@ -476,9 +541,63 @@ function check(type, value, path, userPath) {
 
 check(lookupQType(typeDecl.global,[]), {key: snapshot.global}, '', false);
 
+// --------------------------------------------
+// 		Suggest Additions to the Interface     
+// --------------------------------------------
+
+var SkipFunctionPrtys = ['name', 'length', 'arguments', 'caller', 'callee', 'prototype'];
+
+function skipPrty(obj, name) {
+	if (obj.function) {
+		if (SkipFunctionPrtys.some(name))
+			return true; // don't suggest built-in properties
+		var funProto = lookupObject(FunctionPrototype.key)
+		if (funProto.propertyMap.has(name))
+			return true; // don't suggest properties inherited from Function.prototype
+	}
+	if (name[0] === '_') // naming starting with underscore are almost always private
+		return true;
+	return false;
+}
+
+function findSuggestions() {
+	tpath2values.forEach(function(tpath, values) {
+		if (native_tpaths.has(tpath))
+			return;
+		var type = tpath2type.get(tpath)
+		if (!type) {
+			console.log("Invalid tpath = " + tpath)
+			return
+		}
+		var names = new Map
+		values.forEach(function(value) {
+			value = coerceToObject(value)
+			if (typeof value !== 'object')
+				return;
+			var obj = lookupObject(value.key)
+			obj.propertyMap.forEach(function(name,prty) {
+				if (type.properties[name]) // ignore if type already declares this property
+					return;
+				if (type.stringIndexer && prty.enumerable) // property covered by string indexer
+					return;
+				if (type.numberIndexer && isNumberString(name) && prty.enumerable) // property covered by number indexer
+					return;
+				if (skipPrty(obj,name)) // uninteresting property
+					return;
+				names.increment(name)
+			})
+		})
+		names.forEach(function(name,count) {
+			var alwaysPresent = (count === values.length);
+			var optStr = alwaysPresent ? '' : '(optional)';
+			console.log('Suggestion: ' + qualify(tpath,name) + ' could be added to interface ' + optStr)
+		})
+	})
+}
+findSuggestions()
 
 // ------------------------------------------
-// 		Formatting types and values
+// 		Formatting types and values          
 // ------------------------------------------
 
 // TODO: restrict depth to avoid printing gigantic types
