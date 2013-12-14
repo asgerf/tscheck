@@ -1,10 +1,12 @@
 /*
 	interface State {
-		// ???
+		this : Value
+		
 	}
 	interface Terminator {
 		type: 'break' | 'continue' | 'return'
 		label?: string
+		value?: Value
 	}
 	interface StmtState {
 		terminator? : Terminator
@@ -258,9 +260,26 @@ function visitExp(node, st) {
 		case 'ThisExpression':
 			return thisValue(st)
 		case 'ArrayExpression':
-			
+			var memberTypes = node.elements.map(function(elm) {
+				var er = visitExp(elm, st)
+				st = er.state
+				return er.value
+			})
+			var t;
+			if (memberTypes.length === 0) {
+				// introduce abstract value
+				t = null; // todo
+			} else {
+				 t = bestCommonType(memberTypes)
+			}
+			return {
+				state: st,
+				value: {type:'reference', name:'Array', typeArguments:[t]}
+			}
 	}
 }
+
+
 
 function checkType(node, types) {
 	switch  (node.type) {
