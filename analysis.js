@@ -82,18 +82,16 @@ function visitStmt(node, st) {
 				}
 			});
 		case 'IfStatement':
-			var conds = visitCond(node.test, st);
+			var cond = visitCond(node.test, st);
 			var results = []
-			conds.forEach(function(cond) {
-				if (cond.whenTrue) {
-					results.pushs(visitStmt(node.consequent, cond.whenTrue.state))
-				}
-				if (cond.whenFalse) {
-					if (node.alternate) {
-						results.pushs(visitStmt(node.alternate, cond.whenFalse.state))
-					} else {
-						results.pushs(cond.whenFalse.state)
-					}
+			cond.whenTrue.forEach(function(er) {
+				results.pushs(visitStmt(node.consequent, er.state))
+			})
+			cond.whenFalse.forEach(function(er) {
+				if (node.alternate) {
+					results.pushs(visitStmt(node.alternate, er.state))
+				} else {
+					results.pushs(er.state)
 				}
 			})
 			return results
@@ -106,7 +104,7 @@ function visitStmt(node, st) {
 			memo[h] = [];
 			var results = [];
 			visitStmt(node.body, st).forEach(function(r) {
-				if (r.terminator && (r.terminator.label === node.label.name || r.terminator.label === '*')) {
+				if (r.terminator && r.terminator.label === node.label.name) {
 					if (r.terminator.type === 'continue') {
 						// note: for statement and for-in statement will override this behaviour
 						results.pushs(visitStmt(node, r.state))
@@ -140,33 +138,127 @@ function visitStmt(node, st) {
 			throw new Error("With statement not supported");
 		case 'SwitchStatement':
 			var result = []
-			var er = visitExp(node.discriminant)
-			var caseBranch = er.state
-			var nextCaseBranch = []
-			for (var i=0; i<node.cases.length; i++) {
-				var caze = node.cases[i];
-				var inSt;
-				var outSt;
-				if (caze.test) {
-					var cond = visitStrictEqCond(caze.test, er.value, caseBranch)
-					inSt = cond.whenEq;
-					outSt = cond.whenNeq;
-				} else { // default clause
-					inSt = [caseBranch];
-					outSt = [];
-				}
-				inSt.forEach(function(st) {
-					visitStmtBlock(caze.consequent, st).forEach(function(r) {
-						if (r.terminator && r.terminator.type === 'break' && r.terminator.label === '*') {
-							result.push({state:r.state}) // clear terminator flag
-						} else {
-
-						}
+			visitExp(node.discriminant, st).forEach(function(er) {
+				var caseBranches = [er.state]
+				var fallBranches = []
+				for (var i=0; i<node.cases.length; i++) {
+					var caze = node.cases[i];
+					var nextCase = []
+					var nextFall = []
+					var entryStates;
+					if (caze.test) {
+						entryStates = []
+						caseBranches.forEach(function(caseBranch) {
+							var cond = visitStrictEqCond(caze.test, er.value, caseBranch)
+							entryStates.pushs(cond.whenEq)
+							nextCase.pushs(cond.whenNeq)
+						})
+					} else { // default clause
+						entryStates = [caseBranch];
+					}
+					entryStates = entryStates.concat(fallBranches)
+					entryStates.forEach(function(st) {
+						visitStmtBlock(caze.consequent, st).forEach(function(r) {
+							if (r.terminator && r.terminator.type === 'break' && r.terminator.label === '*') {
+								result.push({state:r.state}) // clear terminator flag
+							} else if (r.terminator) {
+								result.push(r)
+							} else {
+								nextFall.push(r) // fall into next case clause
+							}
+						})
 					})
-				})
-				inSt.map(visitStmtBlock.fill(caze.consequent))
-				visitStmtBlock(caze.consequent, inSt)
+					caseBranch = nextCase
+					fallBranches = nextFall
+				}
+				result.pushs(caseBranch)
 			})
+			return result
+		case 'ReturnStatement':
+			if (node.argument) {
+				return visitExp(node.argument, st).map(function(er) {
+					return {
+						terminator: {type: 'return', value:er.value},
+						state: er.state
+					}
+				})
+			} else {
+				return [{
+					terminator: {type: 'return', value:{type:'void'}},
+					state: st
+				}]
+			}
+		case 'ThrowStatement':
+			return []
+		case 'TryStatement':
+			throw new Error("Try statement not supported")
+		case 'WhileStatement':
+			var memo = getMemo(node)
+			var h = hashState(st)
+			if (h in memo) {
+				return memo[h]
+			}
+			memo[h] = []
+			var result = []
+			var cond = visitCond(node.test, st)
+			cond.whenTrue.forEach(function(er) {
+				visitStmt(node.body, er.state).forEach(function(r) {
+					if (r.terminator && r.terminator.label === '*') {
+						if (r.terminator.type === 'continue') {
+							result.pushs(visitStmt(node, r.state))
+						} else {
+							result.push({state:r.state})
+						}
+					} else if (r.terminator) {
+						result.push(r)
+					} else {
+						result.pushs(visitStmt(node, r.state))
+					}
+				})
+			})
+			cond.whenFalse.forEach(function(er) {
+				result.push(er.state)
+			})
+			memo[h] = result
+			return result
+		case 'DoWhileStatement':
+			var memo = getMemo(node)
+			var h = hashState(st)
+			if (h in memo) {
+				return memo[h]
+			}
+			memo[h] = []
+			var result = []
+			visitStmt(node.body, st).forEach(function(r) {
+				if (r.terminator && r.terminator.label === '*') {
+					if (r.terminator.type === 'continue') {
+						result.pushs(visitStmt(node, r.state))
+					} else {
+						result.push({state:r.state})
+					}
+				} else if (r.terminator) {
+					result.push(r)
+				} else {
+					var cond = visitCond(node.test, r.state)
+					cond.whenTrue.forEach(function(er) {
+						result.pushs(visitStmt(node, {state:er.state}))
+					})
+					cond.whenFalse.forEach(function(er) {
+						result.push({state:er.state})
+					})
+				}
+			})
+			return result
+		/* TODO rest of statements */
+	}
+}
+
+function visitExp(node, st) {
+	switch (node.type) {
+		case 'ThisExpression':
+			return thisValue(st)
+		case 'ArrayExpression':
+			
 	}
 }
 
