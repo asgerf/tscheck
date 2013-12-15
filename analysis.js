@@ -74,7 +74,7 @@ function visitStmtBlock(stmts, st) {
 function visitStmt(node, st) {
 	switch (node.type) {
 		case 'EmptyStatement':
-			return st;
+			return [ { state:st } ];
 		case 'BlockStatement':
 			return visitStmtBlock(node.body, st)
 		case 'ExpressionStatement':
@@ -121,21 +121,21 @@ function visitStmt(node, st) {
 			memo[h] = results;
 			return results;
 		case 'BreakStatement':
-			return {
+			return [{
 				state: st, 
 				terminator: {
 					type: 'break', 
 					label: node.label ? node.label.name : '*'
 				}
-			}
+			}]
 		case 'ContinueStatement':
-			return {
+			return [{
 				state: st,
 				terminator: {
 					type: 'continue',
 					label: node.label ? node.label.name : '*'
 				}
-			}
+			}]
 		case 'WithStatement':
 			throw new Error("With statement not supported");
 		case 'SwitchStatement':
@@ -255,29 +255,128 @@ function visitStmt(node, st) {
 	}
 }
 
+function visitExpx(node, sts) {
+	var result = []
+	sts.forEach(function(st) {
+		visitExp(node,st).forEach(function(er) {
+			result.push(er)
+		})
+	})
+	return result
+}
+
 function visitExp(node, st) {
 	switch (node.type) {
 		case 'ThisExpression':
-			return thisValue(st)
-		case 'ArrayExpression':
-			var memberTypes = node.elements.map(function(elm) {
-				var er = visitExp(elm, st)
-				st = er.state
-				return er.value
-			})
-			var t;
-			if (memberTypes.length === 0) {
-				// introduce abstract value
-				t = null; // todo
-			} else {
-				 t = bestCommonType(memberTypes)
-			}
-			return {
+			return [{
 				state: st,
-				value: {type:'reference', name:'Array', typeArguments:[t]}
+				value: st.this
+			}]
+		case 'ArrayExpression':
+			if (node.elements.length === 0) {
+				return [{
+					state: st,
+					value: {
+						type:'reference', 
+						name:'Array', 
+						typeArguments: [{ type:'abstract', id:getNodeId(node) }]
+					}
+				}]
 			}
+			var states = [{
+				state: st,
+				members: []
+			}]
+			node.elements.forEach(function(elm) {
+				var next = []
+				states.forEach(function(stx) {
+					visitExp(elm, stx.state).forEach(function(er) {
+						next.push({
+							state: er.state,
+							members: stx.members.concat([er.value])
+						})
+					})
+				})
+				states = next
+			})
+			return states.map(function(stx) {
+				return {
+					state: stx.state,
+					value: {
+						type:'reference', 
+						name:'Array', 
+						typeArguments: [ bestCommonType(stx.members) ]
+					}
+				}
+			}) // todo: compress here?
+		case 'ObjectExpression':
+			if (node.properties.length === 0) {
+				return [{
+					state: st,
+					value: {
+						type: 'abstract', 
+						id:getNodeId(node)
+					}
+				}]
+			}
+			var prtys = new Map
+			var states = [{
+				state: st,
+				properties: new Map
+			}]
+			node.properties.forEach(function(prty) {
+				var next = []
+				var name = prty.key.type === 'Identifier' ? prty.key.name : String(prty.key.value);
+				if (prty.kind === 'get' || prty.kind === 'set')  {
+					throw new Error("Getters and setters not supported")
+				} else {
+					states.forEach(function(stx) {
+						visitExp(prty.value, stx.state).forEach(function(er) {
+							var prtys = stx.properties.clone()
+							prtys.put(name, er.value)
+							next.push({
+								state: er.state,
+								properties: prtys
+							})
+						})
+					})
+				}
+				states = next
+			})
+			return states.map(function(stx) {
+				return {
+					state: stx.state,
+					value: {
+						type: 'object',
+						properties: stx.properties.json(),
+						calls: [],
+						stringIndexer: null,
+						numberIndexer: null
+					}
+				}
+			})
+		case 'FunctionExpression':
+			return [{
+				state: st, // todo: use abstract value + function body as abstract state?
+				value: { type:'function', id:getNodeId(node) }
+			}]
+		case 'SequenceExpression':
+			var states = [{state:st, value:null}]
+			node.expressions.forEach(function(exp) {
+				var next = []
+				states.forEach(function(st) {
+					visitExp(exp, st.state).forEach(function(er) {
+						next.push(er)
+					})
+				})
+				states = next
+			})
+			return states
 	}
 }
+
+// When an abstract value is a function pointer, the function must share environment objects with the active environment.
+// Two environments "share environment objects" iff their environment objects are the same for all common ancestor scopes.
 
 
 
