@@ -4,6 +4,7 @@ var tsconvert = require('./tsconvert');
 require('sugar');
 var Map = require('./map');
 var util = require('util');
+var esprima = require('esprima');
 
 var program = require('commander');
 program.parse(process.argv);
@@ -15,6 +16,15 @@ var snapshot = JSON.parse(snapshotText);
 
 var typeDeclFile = program.args[1];
 var typeDeclText = fs.readFileSync(typeDeclFile, 'utf8');
+
+var sourceFile = program.args[2] || null;
+var sourceFileAst;
+if (sourceFile) {
+	var sourceFileText = fs.readFileSync(sourceFile, 'utf8')
+	sourceFileAst = esprima.parse(sourceFileText, {loc:true})
+} else {
+	sourceFileAst = null
+}
 
 var libFile = __dirname + "/lib/lib.d.ts";
 var libFileText = fs.readFileSync(libFile, 'utf8');
@@ -421,7 +431,7 @@ function isNumberString(x) {
 var tpath2values = new Map;
 var native_tpaths = new Map;
 var assumptions = {}
-function check(type, value, path, userPath) {
+function check(type, value, path, userPath, parentKey) {
 	function reportError(msg, optPath, optUserPath) {
 		if (!userPath && !optUserPath)
 			return;
@@ -469,7 +479,7 @@ function check(type, value, path, userPath) {
 						}
 					} else {
 						if ('value' in objPrty) {
-							check(typePrty.type, objPrty.value, qualify(path,k), isUserPath)
+							check(typePrty.type, objPrty.value, qualify(path,k), isUserPath, value.key)
 						} else {
 							// todo: getters and setters require static analysis
 						}
@@ -478,16 +488,21 @@ function check(type, value, path, userPath) {
 				if (type.stringIndexer && type.stringIndexer.type !== 'any') {
 					obj.propertyMap.forEach(function(name,objPrty) {
 						if (objPrty.enumerable && 'value' in objPrty) {
-							check(type.stringIndexer, objPrty.value, path + '[\'' + name + '\']', userPath)
+							check(type.stringIndexer, objPrty.value, path + '[\'' + name + '\']', userPath, value.key)
 						}
 					})
 				}
 				if (type.numberIndexer && type.numberIndexer.type !== 'any') {
 					obj.propertyMap.forEach(function(name,objPrty) {
 						if (objPrty.enumerable && isNumberString(name) && 'value' in objPrty) {
-							check(type.numberIndexer, objPrty.value, path + '[' + name + ']', userPath)
+							check(type.numberIndexer, objPrty.value, path + '[' + name + ']', userPath, value.key)
 						}
 					})
+				}
+				if (userPath) {
+					type.calls.forEach(function (call) {
+						checkCallSignature(call, parentKey, value.key, path)
+					})	
 				}
 			}
 			break;
@@ -504,7 +519,7 @@ function check(type, value, path, userPath) {
 			var objectType = lookupQType(type.name, type.typeArguments)
 			if (!objectType)
 				return; // error issued elsewhere
-			check(objectType, value, path, userPath)
+			check(objectType, value, path, userPath, parentKey)
 			break;
 		case 'enum':
 			var vals = enum_values.get(type.name);
@@ -538,8 +553,6 @@ function check(type, value, path, userPath) {
 			throw new Error("Unrecognized type type: " + type.type + " " + util.inspect(type))
 	}
 }
-
-check(lookupQType(typeDecl.global,[]), {key: snapshot.global}, '', false);
 
 // --------------------------------------------
 // 		Suggest Additions to the Interface     
@@ -665,3 +678,217 @@ function formatValue(value, depth) {
 }
 
 
+// --------------------------
+// 		Static Analysis
+// --------------------------
+
+// Returns the given AST node's immediate children as an array.
+// Property names that start with $ are considered annotations, and will be ignored.
+function children(node) {
+    var result = [];
+    for (var k in node) {
+        if (!node.hasOwnProperty(k))
+            continue;
+        if (k[0] === '$')
+            continue;
+        var val = node[k];
+        if (!val)
+            continue;
+        if (typeof val === "object" && typeof val.type === "string") {
+            result.push(val);
+        }
+        else if (val instanceof Array) {
+            for (var i=0; i<val.length; i++) {
+                var elm = val[i];
+                if (typeof elm === "object" && typeof elm.type === "string") {
+                    result.push(elm);
+                }
+            }
+        } 
+    }
+    return result;
+}
+
+// Injects an the following into functions, programs, and catch clauses
+// - $env: Map from variable names in scope to Identifier at declaration
+// - $depth: nesting depth from top-level
+function injectEnvs(node) {
+    switch (node.type) {
+        case 'Program':
+            node.$env = new Map;
+            node.$depth = 0;
+            break;
+        case 'FunctionExpression':
+            node.$env = new Map;
+            node.$depth = 1 + getEnclosingScope(node.$parent).$depth;
+            if (node.id) {
+                node.$env.put(node.id.name, node.id)
+            }
+            for (var i=0; i<node.params.length; i++) {
+                node.$env.put(node.params[i].name, node.params[i])
+            }
+            break;
+        case 'FunctionDeclaration':
+            var parent = getEnclosingFunction(node.$parent); // note: use getEnclosingFunction, because fun decls are lifted outside catch clauses
+            node.$env = new Map;
+            node.$depth = 1 + parent.$depth;
+            parent.$env.put(node.id.name, node.id)
+            for (var i=0; i<node.params.length; i++) {
+                node.$env.put(node.params[i].name, node.params[i])
+            }
+            break;
+        case 'CatchClause':
+            node.$env = new Map;
+            node.$env.put(node.param.name, node.param)
+            node.$depth = 1 + getEnclosingScope(node.$parent).$depth;
+            break;
+        case 'VariableDeclarator':
+            var parent = getEnclosingFunction(node) // note: use getEnclosingFunction, because vars ignore catch clauses
+            parent.$env.put(node.id.name, node.id)
+            break;
+    }
+    children(node).forEach(injectEnvs)
+}
+
+function numberSourceFileFunctions() {
+	if (sourceFileAst === null)
+		return
+	var array = []
+	function add(x) {
+		x.$function_id = array.length;
+		array.push(x)
+	}
+	function visit(node) {
+		if (node.type === 'Program' || node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression') {
+			add(node)
+		}
+		children(node).forEach(visit)
+	}
+	visit(sourceFileAst)
+	sourceFileAst.$id2function = array;
+}
+
+function prepareAST() {
+	injectEnvs()
+	numberSourceFileFunctions()	
+}
+if (sourceFileAst !== null) {
+	prepareAST()
+}
+
+function findFunction(id) {
+	if (sourceFileAst === null)
+		return null;
+	return sourceFileAst.$id2function[id]
+}
+
+function checkCallSignature(call, receiverKey, objKey, path) {
+	var obj = lookupObject(objKey);
+	if (!obj.function) {
+		console.log(path + ": expected " + formatTypeCall(call) + " but found non-function object")
+		return;
+	}
+	switch (obj.function.type) {
+		case 'native':
+		case 'unknown':
+			break; // XXX: is there a need for something useful here?
+		case 'bind':
+			break; // TODO: support bound functions
+		case 'user':
+			var fun = findFunction(obj.function.id)
+			if (!fun)
+				return
+			console.log(path + ": defined on line " + fun.loc.start.line)
+			break;
+	}
+}
+
+/**
+	interface State {
+		this: Value,
+		variables: Map[Value],
+		abstract: Map[Value]
+	}
+	type StmtResult = { state : State, terminator?: Terminator }
+	type ExpResult = { state : State, value : Value }
+	interface Terminator {
+		type : 'break' | 'continue' | 'return'
+		label?: string
+		value?: Value
+	}
+*/
+
+function analyzeFunction(node, env, receiver, args) { // [ Value ]
+	var variables = new Map
+	node.params.forEach(function(param,i) {
+		variables.put(param.name, args[i])
+	})
+	node.$env.forEach(function(name) {
+		if (!variables.has(name)) {
+			variables.put(name, {
+				type: 'value',
+				value: {type: 'void'}
+			})
+		}
+	})
+	while (env) {
+		var envObj = lookupObject(env.key)
+		envObj.properties.forEach(function(prty) {
+			if (!variables.has(prty.name)) {
+				variables.put(prty.name, {
+					type: 'value',
+					value: prty.value // note: environment objects cannot have getters/setters
+				})
+			}
+		})
+		env = envObj.env
+	}
+	var state = {
+		this: receiver,
+		variables: variables,
+		abstract: new Map
+	}
+	analyzeStmtBlock(node.body, state)
+}
+function analyzeStmtBlock(nodes, state) { // [ { state : State, terminator?: Terminator } ]
+	var states = [state]
+	var result = []
+	nodes.forEach(function(node) {
+		var next = []
+		states.forEach(function(state) {
+			analyzeStmt(node, state).forEach(function(sr) {
+				if (sr.terminator)
+					result.push(sr)
+				else
+					next.push(sr)
+			})
+		})
+		states = next
+	})
+	states.forEach(function(x) {
+		result.push(x)
+	})
+	return result
+}
+function analyzeStmt(node, state) { // [ { state : State, terminator?: Terminator } ]
+	switch (node.type) {
+		case 'EmptyStatement':
+			return [ { state:state } ]
+		
+	}
+}
+function analyzeExp(node, state) { // [ { state : State, value : Value } ]
+
+}
+
+
+// --------------------------
+// 		Entry Point
+// --------------------------
+
+function main() {
+	// TODO: move loading of inputs into main function
+	check(lookupQType(typeDecl.global,[]), {key: snapshot.global}, '', false, null);
+}
+
+main();
