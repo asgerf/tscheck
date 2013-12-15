@@ -874,11 +874,56 @@ function analyzeStmt(node, state) { // [ { state : State, terminator?: Terminato
 	switch (node.type) {
 		case 'EmptyStatement':
 			return [ { state:state } ]
-		
+		case 'BlockStatement':
+			return analyzeStmtBlock(node.body, state)
+		case 'ExpressionStatement':
+			return analyzeExp(node.expression, state).map(function(er) {
+				return {
+					state: er.state
+				}
+			})
+		case 'IfStatement':
+			var result = []
+			var cond = analyzeCondition(node.test, state)
+			cond.whenTrue.forEach(function(er) {
+				analyzeStmt(node.consequent, er.state).forEach(function(sr) {
+					result.push(sr)
+				})
+			})
+			cond.whenFalse.forEach(function(er) {
+				analyzeOptStmt(node.alternate || null, er.state).forEach(function(sr) {
+					result.push(sr)
+				})
+			})
+			return result
+		case 'LabeledStatement':
+			// TODO: memo and recursion cutoff
+			var result = []
+			analyzeStmt(node.body, state).forEach(function(sr) {
+				if (sr.terminator && sr.terminator.label === node.label.name) {
+					if (sr.terminator.type === 'break') {
+						result.push({state:sr.state}) // clear break flag
+					} else { // 'continue'
+						analyzeStmt(node, sr.state).forEach(function(sr) {
+							result.push(sr)
+						})
+					}
+				}
+			})
+			return result
 	}
+}
+function analyzeOptStmt(node, state) {
+	if (!node)
+		return [{state:state}]
+	else
+		return analyzeStmt(node,state)
 }
 function analyzeExp(node, state) { // [ { state : State, value : Value } ]
 
+}
+function analyzeCondition(node, state) { // { whenTrue : ExpResult, whenFalse : ExpResult }
+	
 }
 
 
