@@ -817,7 +817,7 @@ function checkCallSignature(call, receiverKey, objKey, path) {
 	interface State {
 		this: Value,
 		variables: Map[Value],
-		abstract: Map[Value]
+		abstract: Map[AbstractObject]
 	}
 	type StmtResult = { state : State, terminator?: Terminator }
 	type ExpResult = { state : State, value : Value }
@@ -826,6 +826,17 @@ function checkCallSignature(call, receiverKey, objKey, path) {
 		label?: string
 		value?: Value
 	}
+	type AbstractObject = RootObj | ChildObj
+	type ChildObj = {
+		type: 'child',
+		parent: string (name of parent abstract object)
+	}
+	type RootObj = {
+		type: 'root',
+		value: Value (cannot be abstract object!)
+		rank: number (for union by rank)
+	}
+	
 */
 
 var analysisMemo = Object.create(null);
@@ -1200,6 +1211,13 @@ function analyzeOptStmt(node, state) {
 	else
 		return analyzeStmt(node,state)
 }
+var EmptyObjectType = {
+	type: 'object',
+	properties: {},
+	calls: [],
+	stringIndexer: null,
+	numberIndexer: null
+}
 function analyzeExp(node, state) { // [ { state : State, value : Value } ]
 	switch (node.type) {
 		case 'ThisExpression':
@@ -1245,7 +1263,74 @@ function analyzeExp(node, state) { // [ { state : State, value : Value } ]
 				}
 			})
 		case 'ObjectExpression':
-			// ... TODO
+			var statexs = [{
+				state: state,
+				properties: new Map
+			}]
+			node.properties.forEach(function(prty) {
+				if (prty.kind !== 'init')
+					throw new Error("Getters/setters are not supported")
+				var nextStatexs = []
+				var name = prty.key.type === 'Literal' ? prty.key.value : prty.key.name
+				statexs.forEach(function(stx) {
+					analyzeExp(prty.value, stx.state).forEach(function(er) {
+						var prtys = stx.properties.clone()
+						prtys.put(name, er.value)
+						nextStatexs.push({
+							state: er.state,
+							properties: prtys
+						})
+					})
+				})
+				statexs = nextStatexs
+			})
+			// XXX: treat properties with literal names as stringIndexer and numberIndexer entries?
+			var result = []
+			statexs.forEach(function(stx) {
+				var t = { 
+					type:'object', 
+					properties: stx.properties.json(),
+					calls: [],
+					stringIndexer: null,
+					numberIndexer: null
+				}
+				refineAbstract(stx.state, node.$id, t).forEach(function(state) {
+					result.push({
+						state: newState,
+						value: { type: 'abstract', value: node.$id }
+					})
+				})
+			})
+			return result
+		case 'FunctionExpression':
+			throw new Error("Inner function expressions not supported")
+		case 'SequenceExpression':
+			var statexs = [{
+				state: state,
+				value: null
+			}]
+			node.expressions.forEach(function(exp) {
+				var nextStatexs = []
+				statexs.forEach(function(stx) {
+					analyzeExp(exp, stx.state).forEach(function(er) {
+						nextStatexs.push({
+							state: er.state,
+							value: er.value
+						})
+					})
+				})
+				statexs = nextStatexs
+			})
+			return statexs
+			/*
+			x = {}@1
+			while (..) {
+				// [x -> @1, @1 -> {}], [x -> @2, @1 -> {}, @2 -> {f:@1}]
+				x = {f:x}@2
+				// [x -> @2, @1 -> {}, @2 -> {f:@1}], [x -> @1+2, @1+2 -> {f?:@1+2}]
+			}
+			[x -> @1+2, @1+2 -> {f? : @1+2}]
+			*/
 	}
 }
 function analyzeCondition(node, state) { // { whenTrue : ExpResult, whenFalse : ExpResult }
@@ -1264,7 +1349,22 @@ function updateVariable(name, value, state) {
 		abstract: state.abstract
 	}
 }
+function defineAbstract(state, id, value) {
+	var abstr = state.abstract.clone()
+	abstr.put(id, value)
+	return {
+		this: state.this,
+		variables: state.variables,
+		abstract: abstr
+	}
+}
+function refineAbstract(state, id, value) {
+	// ?? {f:T, }
 
+}
+function unionTypes(state, t1, t2) {
+
+}
 
 // --------------------------
 // 		Entry Point
