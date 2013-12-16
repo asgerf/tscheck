@@ -768,9 +768,19 @@ function numberSourceFileFunctions() {
 	sourceFileAst.$id2function = array;
 }
 
+function numberNodes() {
+	var id=0
+	function visit(node) {
+		node.$id = ++id;
+		children(node).forEach(visit)
+	}
+	visit(sourceFileAst)
+}
+
 function prepareAST() {
 	injectEnvs()
 	numberSourceFileFunctions()	
+	numberNodes()
 }
 if (sourceFileAst !== null) {
 	prepareAST()
@@ -817,6 +827,15 @@ function checkCallSignature(call, receiverKey, objKey, path) {
 		value?: Value
 	}
 */
+
+var analysisMemo = Object.create(null);
+function getMemo(node) {
+	var memo = analysisMemo[node.$id];
+	if (!memo) {
+		analysisMemo[node.$id] = memo = Object.create(null);
+	}
+	return memo;
+}
 
 function analyzeFunction(node, env, receiver, args) { // [ Value ]
 	var variables = new Map
@@ -897,20 +916,282 @@ function analyzeStmt(node, state) { // [ { state : State, terminator?: Terminato
 			})
 			return result
 		case 'LabeledStatement':
-			// TODO: memo and recursion cutoff
-			var result = []
+			var memo = getMemo(node)
+			var h = hashState(state)
+			var result = memo[h]
+			if (result) {
+				return result
+			}
+			memo[h] = [] // cycles should initially assume empty set of outcomes
+			result = []
 			analyzeStmt(node.body, state).forEach(function(sr) {
 				if (sr.terminator && sr.terminator.label === node.label.name) {
 					if (sr.terminator.type === 'break') {
 						result.push({state:sr.state}) // clear break flag
 					} else { // 'continue'
+						// recursively analyze labeled statement
 						analyzeStmt(node, sr.state).forEach(function(sr) {
 							result.push(sr)
 						})
 					}
+				} else {
+					result.push(sr)
 				}
 			})
+			memo[h] = result
 			return result
+		case 'BreakStatement':
+			return [{
+				state: state,
+				terminator: { type: 'break', label: node.label ? node.label.name : '*' }
+			}]
+		case 'ContinueStatement':
+			return [{
+				state: state,
+				terminator: { type: 'continue', label: node.label ? node.label.name : '*' }
+			}]
+		case 'WithStatement':
+			throw new Error("With statement not supported")
+		case 'SwitchStatement':
+			var result = []
+			analyzeExp(node.discriminant, state).forEach(function(dr) {
+				var dvalue = dr.value
+				var testBranch = [dr.state]
+				var fallBranch = []
+				node.cases.forEach(function(caze) {
+					var nextTestBranch = []
+					var nextFallBranch = []
+					function kontinue(sr) {
+						if (sr.terminator && sr.terminator.type === 'break' && sr.terminator.label === '*') {
+							result.push({state:sr.state}) // break out and clear terminator
+						} else if (sr.terminator) {
+							result.push(sr) // break out and preserve terminator
+						} else {
+							nextFallBranch.push(sr.state) // fall through to next clause
+						}
+					}
+					testBranch.forEach(function(state) {
+						if (caze.test) {
+							analyzeExp(caze.test, state).forEach(function(testr) {
+								testStrictEq(testr.value, dvalue, testr.state).forEach(function(cr) {
+									cr.whenTrue.forEach(function(er) {
+										analyzeStmtBlock(caze.consequent, er.state).forEach(kontinue)
+									})
+									cr.whenFalse.forEach(function(er) {
+										nextTestBranch.push(er.state)
+									})
+								})
+							})
+						} else { // default clause
+							analyzeStmtBlock(caze.consequent, state).forEach(kontinue)
+						}
+					})
+					fallBranch.forEach(function(state) {
+						analyzeStmtBlock(caze.consequent, state).forEach(kontinue)
+					})
+					testBranch = nextTestBranch
+					fallBranch = nextFallBranch
+				})
+				testBranch.forEach(function(state) {
+					result.push({state:state})
+				})
+				fallBranch.forEach(function(state) {
+					result.push({state:state})
+				})
+			})
+			return result
+		case 'ReturnStatement':
+			if (!node.argument) {
+				return [{
+					state: state,
+					terminator: {
+						type: 'return',
+						value: { type: 'void' }
+					}
+				}]
+			}
+			return analyzeExp(node.argument, state).map(function(er) {
+				return {
+					state: er.state,
+					terminator: {
+						type: 'return',
+						value: er.value
+					}
+				}
+			})
+		case 'ThrowStatement':
+			return analyzeExp(node.argument, state).map(function(er) {
+				return {
+					state: er.state,
+					terminator: {
+						type: 'throw'
+					}
+				}
+			})
+		case 'TryStatement':
+			throw new Error("try statement not supported")
+		case 'WhileStatement':
+			var memo = getMemo(node)
+			var h = hashState(state)
+			var result = memo[h]
+			if (result) {
+				return result
+			}
+			memo[h] = []
+			result = []
+			analyzeCondition(node.test, state).forEach(function(cr) {
+				cr.whenTrue.forEach(function(er) {
+					analyzeStmt(node.body, er.state).forEach(function(sr) {
+						if (sr.terminator && sr.terminator.label === '*') {
+							if (sr.terminator.type === 'break') {
+								result.push({state:sr.state}) // clear terminator
+							} else { // 'continue'
+								analyzeStmt(node, sr.state).forEach(function(sr) {  // recursively analyze while loop
+									result.push(sr)
+								})
+							}
+						} else if (sr.terminator) {
+							result.push(sr)
+						} else {
+							analyzeStmt(node, sr.state).forEach(function(sr) {  // recursively analyze while loop
+								result.push(sr)
+							})
+						}
+					})
+				})
+				cr.whenFalse.forEach(function(er) {
+					result.push({state:er.state})
+				})
+			})
+			memo[h] = result
+			return result
+		case 'DoWhileStatement':
+			var memo = getMemo(node)
+			var h = hashState(state)
+			var result = memo[h]
+			if (result) {
+				return result
+			}
+			memo[h] = []
+			result = []
+			analyzeStmt(node.body, state).forEach(function(sr) {
+				if (sr.terminator && sr.terminator.label === '*') {
+					if (sr.terminator.type === 'break') {
+						result.push({state:sr.state}) // clear terminator
+					} else { // 'continue'
+						analyzeStmt(node, sr.state).forEach(function(sr) {  // recursively analyze do-while loop
+							result.push(sr)
+						})
+					}
+				} else if (sr.terminator) {
+					result.push(sr)
+				} else {
+					analyzeCondition(node.test, sr.state).forEach(function(cr) {
+						cr.whenTrue.forEach(function(er) {
+							analyzeStmt(node, er.state).forEach(function(sr) {  // recursively analyze do-while loop
+								result.push(sr)
+							})
+						})
+						cr.whenFalse.forEach(function(er) {
+							result.push({state:er.state})
+						})
+					})
+				}
+			})
+			memo[h] = result
+			return result
+		case 'ForStatement':
+			var initStates = []
+			if (node.init === null) {
+				initStates.push(state)
+			} else if (node.init.type === 'VariableDeclaration') {
+				analyzeStmt(node.init, state).forEach(function(sr) {
+					initStates.push(sr.state) // note: variable declaration cannot produce a terminator
+				})
+			} else { // expression
+				analyzeExp(node.init, state).forEach(function(er) {
+					initStates.push(er.state)
+				})
+			}
+			var memo = getMemo(node)
+			function analyzeLoop(state) {
+				var h = hashState(state)
+				var result = memo[h]
+				if (result) {
+					return result
+				}
+				memo[h] = []
+				var cond;
+				if (node.test) {
+					cond = analyzeCondition(node.test, state)
+				} else {
+					cond = { whenTrue: [{state:state}], whenFalse:[] }
+				}
+				cond.whenTrue.forEach(function(er) {
+					var afterUpdate;
+					if (node.update) {
+						afterUpdate = analyzeExp(node.update, er.state)
+					} else {
+						afterUpdate = [er]
+					}
+					afterUpdate.forEach(function(er) {
+						analyzeStmt(node.body, er.state).forEach(function(sr) {
+							if (sr.terminator && sr.terminator.label === '*') {
+								if (sr.terminator.type === 'break') {
+									result.push({state:sr.state}) // clear terminator
+								} else { // 'continue'
+									analyzeLoop(sr.state).forEach(function(sr) { // recursively analyze loop part
+										result.push(sr)
+									})
+								}
+							} else if (sr.terminator) {
+								result.push(sr) // preserve terminator
+							} else {
+								analyzeLoop(sr.state).forEach(function(sr) { // recursively analyze loop part
+									result.push(sr)
+								})
+							}
+						})
+					})
+				})
+				cond.whenFalse.forEach(function(er) {
+					result.push({state:er.state})
+				})
+				memo[h] = result
+				return result
+			}
+			var outerResult = []
+			initStates.forEach(function(state) {
+				analyzeLoop(state).forEach(function(sr) {
+					outerResult.push(sr)
+				})
+			})
+			return outerResult
+		case 'ForInStatement':
+			throw new Error("For-in loop not supported")
+		case 'VariableDeclaration':
+		 	var states = [state]
+		 	node.declarations.forEach(function(decl) {
+		 		if (!decl.init) {
+		 			return; // environments have already been built; vars without initializers are now considered no-ops
+		 		}
+		 		var nextStates = []
+		 		var name = decl.id.name
+		 		states.forEach(function(state) {
+		 			analyzeExp(decl.init, state).forEach(function(er) {
+		 				var newState = updateVariable(name, er.value, er.state)
+		 				nextStates.push(newState)
+		 			})
+		 		})
+		 		states = nextStates
+		 	})
+		 	return states.map(function(state) {
+		 		return {state:state}
+		 	})
+		case 'FunctionDeclaration':
+			throw new Error("Inner functions not supported")
+		default:
+			throw new Error("Unrecognized statement: " + (node.type || util.inspect(node)))
 	}
 }
 function analyzeOptStmt(node, state) {
@@ -920,10 +1201,68 @@ function analyzeOptStmt(node, state) {
 		return analyzeStmt(node,state)
 }
 function analyzeExp(node, state) { // [ { state : State, value : Value } ]
-
+	switch (node.type) {
+		case 'ThisExpression':
+			return [{
+				state: state,
+				value: state.this
+			}]
+		case 'ArrayExpression':
+			var statexs = [{
+				state: state,
+				elements: []
+			}]
+			node.elements.forEach(function(elm) {
+				if (!elm)
+					return;
+				var nextStatexs = []
+				statexs.forEach(function(stx) {
+					analyzeExp(elm, stx.states).forEach(function(er) {
+						if (er.value.type === 'void') {
+							nextStatexs.push({
+								state: er.state,
+								elements: stx.elements
+							})
+						} else {
+							nextStatexs.push({
+								state: er.state,
+								elements: stx.elements.concat([er.value])
+							})
+						}
+					})
+				})
+				statexs = nextStatexs
+			})
+			return statexs.map(function(stx) {
+				var t = stx.elements.length === 0 ? {type:'abstract', id:node.$id} : bestCommonType(stx.elements);
+				return {
+					state: stx.state,
+					value: {
+						type: 'reference',
+						name: 'Array',
+						typeArguments: [t]
+					}
+				}
+			})
+		case 'ObjectExpression':
+			// ... TODO
+	}
 }
 function analyzeCondition(node, state) { // { whenTrue : ExpResult, whenFalse : ExpResult }
-	
+	// TODO
+}
+
+function bestCommonType(types) {
+	// TODO
+}
+function updateVariable(name, value, state) {
+	var vars = state.variables.clone()
+	vars.put(name,value)
+	return {
+		this: state.this,
+		variables: vars,
+		abstract: state.abstract
+	}
 }
 
 
