@@ -11,7 +11,7 @@ do
 		if [[ -z $selected_test || ($selected_test = $name) ]];
 		then
 			echo $name
-			./tscheck.js $snapshot $decl >output/$name.txt
+			./tscheck.js $snapshot $decl >output/$name.txt --compact
 		fi
 	fi
 	# snapshot="$name.jsnap"

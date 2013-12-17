@@ -7,6 +7,8 @@ var util = require('util');
 var esprima = require('esprima');
 
 var program = require('commander');
+program.option('--compact', 'Report at most one violation per type path')
+	   .option('--no-suggest', 'Do not suggest additions to the interface')
 program.parse(process.argv);
 
 // usage: tscheck SNAPSHOT INTERACE
@@ -428,19 +430,26 @@ function isNumberString(x) {
 	return x === String(Math.floor(Number(x)))
 }
 
+
+var tpath2warning = new Map;
+function reportError(msg, path, tpath) {
+	var append = ''
+	if (program.compact && tpath2warning.has(tpath)) {
+		append = ' [REPEAT]'
+	}
+	tpath2warning.put(tpath, true)
+	console.log((path || '<global>') + ": " + msg + append)
+}
+
 var tpath2values = new Map;
 var native_tpaths = new Map;
 var assumptions = {}
-function check(type, value, path, userPath, parentKey) {
-	function reportError(msg, optPath, optUserPath) {
-		if (!userPath && !optUserPath)
-			return;
-		var optPath = optPath || path;
-		console.log((optPath || '<global>') + ": " + msg)
-	}
+function check(type, value, path, userPath, parentKey, tpath) {
 	function must(condition) {
 		if (!condition) {
-			reportError("expected " + formatType(type) + " but found value " + formatValue(value));
+			if (userPath) {
+				reportError("expected " + formatType(type) + " but found value " + formatValue(value), path, tpath);
+			}
 			return false;
 		} else {
 			return true;
@@ -457,6 +466,7 @@ function check(type, value, path, userPath, parentKey) {
 			if (!type.path) {
 				console.log("Missing type path at value " + path)
 			}
+			tpath = type.path; // override tpath with object's own path
 			tpath2values.push(type.path, value)
 			if (!userPath) {
 				native_tpaths.put(type.path, true)
@@ -465,7 +475,7 @@ function check(type, value, path, userPath, parentKey) {
 			if (must(typeof value === 'object')) {
 				var obj = lookupObject(value.key)
 				if (checkCyclicPrototype(value.key)) {
-					reportError("Cyclic prototype chain");
+					reportError("Cyclic prototype chain", path, tpath);
 					return;
 				}
 				for (var k in type.properties) {
@@ -475,11 +485,11 @@ function check(type, value, path, userPath, parentKey) {
 					var objPrty = obj.propertyMap.get(k) //findPrty(obj, k)
 					if (!objPrty) {
 						if (!typePrty.optional && isUserPath) {
-							reportError("expected " + formatType(typePrty.type) + " but found nothing", qualify(path,k), isUserPath)
+							reportError("expected " + formatType(typePrty.type) + " but found nothing", qualify(path,k), qualify(tpath,k))
 						}
 					} else {
 						if ('value' in objPrty) {
-							check(typePrty.type, objPrty.value, qualify(path,k), isUserPath, value.key)
+							check(typePrty.type, objPrty.value, qualify(path,k), isUserPath, value.key, qualify(tpath,k))
 						} else {
 							// todo: getters and setters require static analysis
 						}
@@ -488,14 +498,14 @@ function check(type, value, path, userPath, parentKey) {
 				if (type.stringIndexer && type.stringIndexer.type !== 'any') {
 					obj.propertyMap.forEach(function(name,objPrty) {
 						if (objPrty.enumerable && 'value' in objPrty) {
-							check(type.stringIndexer, objPrty.value, path + '[\'' + name + '\']', userPath, value.key)
+							check(type.stringIndexer, objPrty.value, path + '[\'' + name + '\']', userPath, value.key, tpath + '[string]')
 						}
 					})
 				}
 				if (type.numberIndexer && type.numberIndexer.type !== 'any') {
 					obj.propertyMap.forEach(function(name,objPrty) {
 						if (objPrty.enumerable && isNumberString(name) && 'value' in objPrty) {
-							check(type.numberIndexer, objPrty.value, path + '[' + name + ']', userPath, value.key)
+							check(type.numberIndexer, objPrty.value, path + '[' + name + ']', userPath, value.key, tpath + '[number]')
 						}
 					})
 				}
@@ -517,7 +527,7 @@ function check(type, value, path, userPath, parentKey) {
 			var objectType = lookupQType(type.name, type.typeArguments)
 			if (!objectType)
 				return; // error issued elsewhere
-			check(objectType, value, path, userPath, parentKey)
+			check(objectType, value, path, userPath, parentKey, type.name)
 			break;
 		case 'enum':
 			var vals = enum_values.get(type.name);
@@ -1377,8 +1387,10 @@ function unionTypes(state, t1, t2) {
 
 function main() {
 	// TODO: move loading of inputs into main function
-	check(lookupQType(typeDecl.global,[]), {key: snapshot.global}, '', false, null);
-	findSuggestions()
+	check(lookupQType(typeDecl.global,[]), {key: snapshot.global}, '', false, null, '<global>');
+	if (program.suggest) {
+		findSuggestions()
+	}
 }
 
 main();
