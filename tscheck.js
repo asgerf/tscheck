@@ -607,7 +607,6 @@ function findSuggestions() {
 		})
 	})
 }
-findSuggestions()
 
 // ------------------------------------------
 // 		Formatting types and values          
@@ -1373,6 +1372,7 @@ function unionTypes(state, t1, t2) {
 function main() {
 	// TODO: move loading of inputs into main function
 	check(lookupQType(typeDecl.global,[]), {key: snapshot.global}, '', false, null);
+	findSuggestions()
 }
 
 main();
