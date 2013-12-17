@@ -508,8 +508,6 @@ function check(type, value, path, userPath, parentKey) {
 			break;
 		case 'reference':
 			value = coerceToObject(value)
-			if (value === null)
-				return; // null matches any object type
 			if (!must(typeof value === 'object'))
 				return; // only object types can match a reference
 			var assumKey = value.key + '~' + canonicalizeType(type)
@@ -526,7 +524,7 @@ function check(type, value, path, userPath, parentKey) {
 			if (vals.length === 0) {
 				must(typeof value !== 'undefined');
 			} else {
-				must(vals.some(function(x) { return x === value }));
+				must(vals.some(function(x) { return valuesStrictEq(x,value) }));
 			}
 			break;
 		case 'string-const':
@@ -552,6 +550,14 @@ function check(type, value, path, userPath, parentKey) {
 		default:
 			throw new Error("Unrecognized type type: " + type.type + " " + util.inspect(type))
 	}
+}
+
+function valuesStrictEq(x,y) {
+	if (x === y)
+		return true
+	if (x && typeof x === 'object' && y && typeof y === 'object')
+		return x.key === y.key
+	return false
 }
 
 // --------------------------------------------
