@@ -50,9 +50,11 @@ interface ObjectType {
 	numberIndexer: Type | null
 }
 interface Property {
-	origin: string  // which file contributed the property
 	optional: boolean
 	type: Type
+	meta: {
+		origin: string  // which file contributed the property
+	}
 }
 interface Call {
 	new: boolean
@@ -60,6 +62,10 @@ interface Call {
 	typeParameters: Array[TypeParameter]
 	parameters: Array[Parameter]
 	returnType: Type
+	meta: {
+		implicit: boolean 	// true if default constructor
+	}
+}
 }
 interface Parameter {
 	optional: boolean

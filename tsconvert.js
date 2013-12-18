@@ -148,9 +148,11 @@ TObject.prototype.getMember = function(name, optional) {
 	var t = this.properties.get(name)
 	if (!t) {
 	    t = {
-            origin: current_file,
             optional: !!optional,
-            type:new TObject(null)
+            type:new TObject(null),
+            meta: {
+                origin: current_file
+            }
         }
 	    this.properties.put(name,t)
 	}
@@ -166,9 +168,11 @@ TObject.prototype.setMember = function(name,typ,optional) {
         optional &= existing.optional;
     }
 	this.properties.put(name, {
-        origin: current_file,
         optional: !!optional,
-        type: typ
+        type: typ,
+        meta: {
+            origin: current_file
+        }
     })
 }
 TObject.prototype.toString = function() {
@@ -413,7 +417,10 @@ function parseClass(node, constructorType, host) {
             indexer: false,
             typeParameters: typeParams,
             parameters: [],
-            returnType: selfType
+            returnType: selfType,
+            meta: {
+                implicit: true
+            }
         });
     }
     current_scope = original_scope // restore previous scope
@@ -571,12 +578,15 @@ function parseConstructorFunction(node, selfTypeRef, instanceTypeParams) {
 		typeParams.push(parseTypeParameter(tp))
 	})
 	var t = {
-		'new': true,
+		new: true,
 		variadic: node.variableArgList,
 		indexer: false,
 		typeParameters: typeParams,
 		parameters: node.arguments.members.map(parseParameter),
-        returnType: selfTypeRef
+        returnType: selfTypeRef,
+        meta: {
+            implicit: false
+        }
 	}
 	current_scope = current_scope.parent // restore scope
 	return t
@@ -592,12 +602,15 @@ function parseFunctionType(node) {
 		typeParams.push(parseTypeParameter(tp))
 	})
     var result = {
-        'new': node.isConstructMember(),
+        new: node.isConstructMember(),
         variadic: node.variableArgList,
         indexer: node.isIndexerMember(),
         typeParameters: typeParams,
         parameters: node.arguments.members.map(parseParameter),
-        returnType: node.returnTypeAnnotation ? parseType(node.returnTypeAnnotation) : TAny
+        returnType: node.returnTypeAnnotation ? parseType(node.returnTypeAnnotation) : TAny,
+        meta: {
+            implicit: false
+        }
     }
     current_scope = current_scope.parent
     return result
@@ -678,22 +691,25 @@ function renameTypeParametersInCall(call, mapping) {
 		typeParams = []
 	}
 	return {
-		'new': call.new,
+		new: call.new,
 		variadic: call.variadic,
 		indexer: call.indexer,
 		typeParameters: typeParams,
 		parameters: call.parameters.map(function(param) {
 			return renameTypeParametersInParam(param, mapping)
 		}),
-		returnType: renameTypeParametersInType(call.returnType, mapping)
+		returnType: renameTypeParametersInType(call.returnType, mapping),
+        meta: {
+            implicit: call.implicit
+        }
 	}
 }
 
 function renameTypeParametersInPrty(prty, mapping) {
     return {
-        origin: prty.origin,
         optional: prty.optional,
-        type: renameTypeParametersInType(prty.type, mapping)
+        type: renameTypeParametersInType(prty.type, mapping),
+        meta: prty.meta
     }
 }
 
@@ -1013,12 +1029,13 @@ function resolveType(x) {
 
 function resolveCall(call) {
 	return {
-		'new': call.new,
+		new: call.new,
 		variadic: call.variadic,
 		indexer: call.indexer,
 		typeParameters: call.typeParameters.map(resolveTypeParameter),
 		parameters: call.parameters.map(resolveParameter),
-		returnType: resolveType(call.returnType)
+		returnType: resolveType(call.returnType),
+        meta: call.meta,
 	}
 
 }
@@ -1042,9 +1059,9 @@ function resolveObject(type) {
 		if (prty.type.constructor.name == 'Object')
 			throw new TypeError(type.qname + "." + name + " is not a type: " + util.inspect(prty.type))
 		return {
-            origin: prty.origin,
             optional: prty.optional,
-            type: resolveType(prty.type)
+            type: resolveType(prty.type),
+            meta: prty.meta
         }
 	})
 	type.types.mapUpdate(function(name,typ) {
@@ -1096,9 +1113,11 @@ function demodule(t) {
         if (!module.origin)
             throw new Error("No origin on module: " + module.qname)
         t.properties.put(name, {
-            origin: module.origin,
             optional: false, 
-            type: ref
+            type: ref,
+            meta: {
+                origin: module.origin
+            }
         })
         demodule(module)
     })
@@ -1116,9 +1135,9 @@ function demodulePhase() {
 
 function substProperty(prty, tenv) {
     return {
-        origin: prty.origin,
         optional: prty.optional,
-        type: substType(prty.type, tenv)
+        type: substType(prty.type, tenv),
+        meta: prty.meta
     }
 }
 function substParameter(param, tenv) {
@@ -1146,7 +1165,8 @@ function substCall(call, tenv) {
         indexer: call.indexer,
         typeParameters: typeParams,
         parameters: call.parameters.map(substParameter.fill(undefined,tenv)),
-        returnType: substType(call.returnType, tenv)
+        returnType: substType(call.returnType, tenv),
+        meta: call.meta
     }
 }
 
@@ -1265,19 +1285,20 @@ function outputCall(call) {
     if (call.indexer)
         return null;
     return {
-        'new': call.new,
+        new: call.new,
         variadic: call.variadic,
         typeParameters: call.typeParameters.map(outputTypeParameter),
         parameters: call.parameters.map(outputParameter),
-        returnType: outputType(call.returnType)
+        returnType: outputType(call.returnType),
+        meta: call.meta
     }
 }
 
 function outputProperty(prty) {
     return {
-        origin: prty.origin,
         optional: prty.optional,
-        type: outputType(prty.type)
+        type: outputType(prty.type),
+        meta: prty.meta
     }
 }
 

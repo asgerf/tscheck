@@ -220,13 +220,15 @@ function substCall(call, tenv) {
 		variadic: call.variadic,
 		typeParameters: typeParams,
 		parameters: call.parameters.map(substParameter.fill(undefined, tenv)),
-		returnType: substType(call.returnType, tenv)
+		returnType: substType(call.returnType, tenv),
+		meta: call.meta
 	}
 }
 function substPrty(prty, tenv) {
 	return {
 		optional: prty.optional,
-		type: substType(prty.type, tenv)
+		type: substType(prty.type, tenv),
+		meta: prty.meta
 	}
 }
 function substType(type, tenv) {
@@ -486,7 +488,7 @@ function check(type, value, path, userPath, parentKey, tpath) {
 				}
 				for (var k in type.properties) {
 					var typePrty = type.properties[k]
-					var isUserPrty = typePrty.origin != LIB_ORIGIN;
+					var isUserPrty = typePrty.meta.origin != LIB_ORIGIN;
 					var isUserPath = userPath || isUserPrty;
 					var objPrty = obj.propertyMap.get(k) //findPrty(obj, k)
 					if (!objPrty) {
@@ -517,7 +519,9 @@ function check(type, value, path, userPath, parentKey, tpath) {
 				}
 				if (userPath) {
 					type.calls.forEach(function (call) {
-						checkCallSignature(call, parentKey, value.key, path)
+						if (!call.meta.implicit) { // do not check default constructor
+							checkCallSignature(call, parentKey, value.key, path)
+						}
 					})	
 				}
 			}
