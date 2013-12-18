@@ -126,7 +126,9 @@ function TString(value) {
 }
 
 // Object type.
-function TObject(qname) {
+function TObject(qname, kind) {
+    if (typeof kind === 'undefined')
+        throw new Error("Missing kind for TObject")
 	this.qname = qname;
     this.properties = new Map;
     this.modules = new Map;
@@ -134,11 +136,14 @@ function TObject(qname) {
     this.types = new Map;
     this.supers = []
     this.typeParameters = []
+    this.meta = {
+        kind: kind
+    }
 }
 TObject.prototype.getModule = function(name) {
 	var t = this.modules.get(name)
 	if (!t) {
-	    t = new TObject(null)
+	    t = new TObject(null, 'module')
 	    this.modules.put(name,t)
 	}
     t.origin = current_file
@@ -149,7 +154,7 @@ TObject.prototype.getMember = function(name, optional) {
 	if (!t) {
 	    t = {
             optional: !!optional,
-            type:new TObject(null),
+            type:new TObject(null, 'interface'),
             meta: {
                 origin: current_file
             }
@@ -332,7 +337,6 @@ function parseEnum(node, objectType, host) {
 	var qname = qualify(host, node.name.text())
 	var enumType = new TEnum(qname)
     var enumMembers = [];
-	// var objectType = new TObject(null)
 	node.members.members.forEach(function (member) {
 		if (member instanceof TypeScript.VariableStatement) {
 			member.declaration.declarators.members.forEach(function (decl) {
@@ -363,8 +367,7 @@ function parseClass(node, constructorType, host) {
 	current_node = node;
 	var name = node.name.text()
     var qname = qualify(host, name)
-    var instanceType = new TObject(qname)
-    // var constructorType = new TObject(null)
+    var instanceType = new TObject(qname, 'class')
     var instanceRef = new TQualifiedReference(qname)
     
     // put type parameters into scope
@@ -432,7 +435,7 @@ function parseClass(node, constructorType, host) {
 function parseInterface(node, host) {
 	current_node = node;
 	var qname = qualify(host, node.name.text());
-    var typ = new TObject(qname)
+    var typ = new TObject(qname, 'interface')
     current_scope = new TTypeParameterScope(current_scope)
     node.typeParameters && node.typeParameters.members.forEach(function(tp,index) {
     	var name = tp.name.text()
@@ -525,7 +528,7 @@ function parseType(node) {
         return parseInterface(node)
     } 
     else if (node instanceof TypeScript.FunctionDeclaration) {
-    	var t = new TObject(null);
+    	var t = new TObject(null, 'interface');
         t.calls.push(parseFunctionType(node))
         return t;
     }
@@ -619,7 +622,7 @@ function parseFunctionType(node) {
 var global_type;
 var current_file = '?';
 function parsingPhase() {
-    global_type = new TObject('');
+    global_type = new TObject('', 'module');
     extern_types = new Map;
     inputs.forEach(function (input) {
         current_file = input.file;
@@ -1172,7 +1175,7 @@ function substCall(call, tenv) {
 
 function substType(type, tenv) {
     if (type instanceof TObject) {
-        var t = new TObject(null)
+        var t = new TObject(null, type.meta.kind)
         t.properties = type.properties.mapv(substProperty.fill(undefined,tenv))
         t.calls = type.calls.map(substCall.fill(undefined,tenv))
         return t;
@@ -1327,7 +1330,8 @@ function outputType(type) {
             properties: type.properties.mapv(outputProperty).json(),
             calls: type.calls.map(outputCall).compact(),
             stringIndexer: findIndexer(type.calls, 'string'),
-            numberIndexer: findIndexer(type.calls, 'number')
+            numberIndexer: findIndexer(type.calls, 'number'),
+            meta: type.meta
         }
     }
     else if (type instanceof TQualifiedReference) {

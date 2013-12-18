@@ -247,7 +247,8 @@ function substType(type, tenv) {
 			calls: type.calls.map(substCall.fill(undefined,tenv)),
 			stringIndexer: type.stringIndexer && substType(type.stringIndexer, tenv),
 			numberIndexer: type.numberIndexer && substType(type.numberIndexer, tenv),
-			path: type.path
+			path: type.path,
+			meta: type.meta
 		}
 		break;
 	case 'reference':
@@ -493,7 +494,12 @@ function check(type, value, path, userPath, parentKey, tpath) {
 					var objPrty = obj.propertyMap.get(k) //findPrty(obj, k)
 					if (!objPrty) {
 						if (!typePrty.optional && isUserPath) {
-							reportError("expected " + formatType(typePrty.type) + " but found nothing", qualify(path,k), qualify(tpath,k))
+							var can_be_optional = type.meta.kind === 'interface'; // only interfaces can have optional members
+							if (typePrty.type.type === 'boolean' && !can_be_optional) {
+								// filter out warnings about absent boolean flags, where the flag cannot be declared optional
+							} else {
+								reportError("expected " + formatType(typePrty.type) + " but found nothing", qualify(path,k), qualify(tpath,k))
+							}
 						}
 					} else {
 						if ('value' in objPrty) {
@@ -1241,7 +1247,8 @@ var EmptyObjectType = {
 	properties: {},
 	calls: [],
 	stringIndexer: null,
-	numberIndexer: null
+	numberIndexer: null,
+	meta: {kind: 'interface'}
 }
 function analyzeExp(node, state) { // [ { state : State, value : Value } ]
 	switch (node.type) {
@@ -1317,7 +1324,8 @@ function analyzeExp(node, state) { // [ { state : State, value : Value } ]
 					properties: stx.properties.json(),
 					calls: [],
 					stringIndexer: null,
-					numberIndexer: null
+					numberIndexer: null,
+					meta: {kind:'interface'}
 				}
 				refineAbstract(stx.state, node.$id, t).forEach(function(state) {
 					result.push({

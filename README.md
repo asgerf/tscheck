@@ -48,12 +48,15 @@ interface ObjectType {
 	calls: Array[Call]
 	stringIndexer: Type | null
 	numberIndexer: Type | null
+	meta: {
+		kind: 'module' | 'class' | 'interface'
+	}
 }
 interface Property {
 	optional: boolean
 	type: Type
 	meta: {
-		origin: string  // which file contributed the property
+		origin: string  	     // which file contributed the property
 	}
 }
 interface Call {
