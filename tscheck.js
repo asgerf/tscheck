@@ -7,9 +7,14 @@ var util = require('util');
 var esprima = require('esprima');
 
 var program = require('commander');
+program.usage("FILE.jsnap FILE.d.ts [options]")
 program.option('--compact', 'Report at most one violation per type path')
 	   .option('--no-suggest', 'Do not suggest additions to the interface')
 program.parse(process.argv);
+
+if (program.args.length < 2) {
+	program.help()
+}
 
 // usage: tscheck SNAPSHOT INTERACE
 var snapshotFile = program.args[0]
@@ -435,7 +440,8 @@ var tpath2warning = new Map;
 function reportError(msg, path, tpath) {
 	var append = ''
 	if (program.compact && tpath2warning.has(tpath)) {
-		append = ' [REPEAT]'
+		// append = ' [REPEAT]'
+		return
 	}
 	tpath2warning.put(tpath, true)
 	console.log((path || '<global>') + ": " + msg + append)
