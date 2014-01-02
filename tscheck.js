@@ -375,7 +375,7 @@ function indexProperties(obj) {
 snapshot.heap.forEach(indexProperties);
 
 function lookupPath(path, e) {
-	e = e || function() { throw new Error("Missing valeu at " + path) }
+	e = e || function() { throw new Error("Missing value at " + path) }
 	var value = {key: snapshot.global}
 	var toks = path.split('.')
 	for (var i=0; i<toks.length; i++) {
@@ -530,6 +530,11 @@ function check(type, value, path, userPath, parentKey, tpath) {
 						}
 					})	
 				}
+				if (type.brand) {
+					if (hasBrand(value, type.brand) === false) {
+						reportError("missing prototype for branded type " + type.brand, path, tpath)
+					}
+				}
 			}
 			break;
 		case 'reference':
@@ -584,6 +589,22 @@ function valuesStrictEq(x,y) {
 	if (x && typeof x === 'object' && y && typeof y === 'object')
 		return x.key === y.key
 	return false
+}
+
+// Returns true if brand is satisfied, false if brand is not satisfied, or null if brand prototype could not be found.
+function hasBrand(value, brand) {
+	var ctor = lookupPath(brand, function() { return null })
+	if (!ctor || typeof ctor !== 'object')
+		return null;
+	var proto = lookupObject(ctor.key).propertyMap.get('prototype')
+	if (!proto || !proto.value || typeof proto.value !== 'object')
+		return null;
+	while (value && typeof value === 'object') {
+		if (value.key === proto.value.key)
+			return true
+		value = lookupObject(value.key).prototype
+	}
+	return false;
 }
 
 // --------------------------------------------

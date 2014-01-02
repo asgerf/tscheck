@@ -48,6 +48,7 @@ interface ObjectType {
 	calls: Array[Call]
 	stringIndexer: Type | null
 	numberIndexer: Type | null
+	brand: string | null // path to constructor
 	meta: {
 		kind: 'module' | 'class' | 'interface'
 	}

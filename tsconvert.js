@@ -136,6 +136,7 @@ function TObject(qname, kind) {
     this.types = new Map;
     this.supers = []
     this.typeParameters = []
+    this.brand = null;
     this.meta = {
         kind: kind
     }
@@ -368,6 +369,7 @@ function parseClass(node, constructorType, host) {
 	var name = node.name.text()
     var qname = qualify(host, name)
     var instanceType = new TObject(qname, 'class')
+    instanceType.brand = qname;
     var instanceRef = new TQualifiedReference(qname)
     
     // put type parameters into scope
@@ -753,6 +755,11 @@ function mergeInto(typ, other) {
         return;
     if (typ.typeParameters.length !== other.typeParameters.length)
     	throw new TypeError("Unequal number of type parameters for partial definitions of " + typ.qname)
+    if (typ.brand && other.brand)
+        throw new TypeError("Incompatible types: " + typ.qname + " and " + other.qname)
+    if (other.brand) {
+        typ.brand = other.brand
+    }
     var mapping = new Map
     for (var i=0; i<typ.typeParameters.length; i++) {
     	mapping.put(other.typeParameters[i].name, typ.typeParameters[i].name)
@@ -1178,6 +1185,7 @@ function substType(type, tenv) {
         var t = new TObject(null, type.meta.kind)
         t.properties = type.properties.mapv(substProperty.fill(undefined,tenv))
         t.calls = type.calls.map(substCall.fill(undefined,tenv))
+        t.brand = type.brand
         return t;
     }
     else if (type instanceof TGeneric) {
@@ -1331,6 +1339,7 @@ function outputType(type) {
             calls: type.calls.map(outputCall).compact(),
             stringIndexer: findIndexer(type.calls, 'string'),
             numberIndexer: findIndexer(type.calls, 'number'),
+            brand: type.brand,
             meta: type.meta
         }
     }
