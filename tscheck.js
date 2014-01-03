@@ -761,6 +761,36 @@ function children(node) {
     return result;
 }
 
+// Assigns parent pointers to each node. The parent pointer is called $parent.
+function injectParentPointers(node, parent) {
+    node.$parent = parent;
+    var list = children(node);
+    for (var i=0; i<list.length; i++) {
+        injectParentPointers(list[i], node);
+    }
+}
+
+// Returns the function or program immediately enclosing the given node, possibly the node itself.
+function getEnclosingFunction(node) {
+    while  (node.type !== 'FunctionDeclaration' && 
+            node.type !== 'FunctionExpression' && 
+            node.type !== 'Program') {
+        node = node.$parent;
+    }
+    return node;
+}
+
+// Returns the function, program or catch clause immediately enclosing the given node, possibly the node itself.
+function getEnclosingScope(node) {
+    while  (node.type !== 'FunctionDeclaration' && 
+            node.type !== 'FunctionExpression' && 
+            node.type !== 'CatchClause' &&
+            node.type !== 'Program') {
+        node = node.$parent;
+    }
+    return node;
+}
+
 // Injects an the following into functions, programs, and catch clauses
 // - $env: Map from variable names in scope to Identifier at declaration
 // - $depth: nesting depth from top-level
@@ -830,7 +860,8 @@ function numberNodes() {
 }
 
 function prepareAST() {
-	injectEnvs()
+	injectParentPointers(sourceFileAst)
+	injectEnvs(sourceFileAst)
 	numberSourceFileFunctions()	
 	numberNodes()
 }
@@ -858,9 +889,13 @@ function checkCallSignature(call, receiverKey, objKey, path) {
 			break; // TODO: support bound functions
 		case 'user':
 			var fun = findFunction(obj.function.id)
+
 			if (!fun)
 				return
-			console.log(path + ": defined on line " + fun.loc.start.line)
+			if (fun.params.length !== call.parameters.length) {
+				console.log(path + ": function takes " + fun.params.length + " params but " + call.parameters.length + " were declared in call signature")
+			}
+			// console.log(path + ": function defined on line " + fun.loc.start.line)
 			break;
 	}
 }
@@ -878,17 +913,13 @@ function checkCallSignature(call, receiverKey, objKey, path) {
 		label?: string
 		value?: Value
 	}
-	type AbstractObject = RootObj | ChildObj
-	type ChildObj = {
-		type: 'child',
-		parent: string (name of parent abstract object)
-	}
-	type RootObj = {
-		type: 'root',
-		value: Value (cannot be abstract object!)
+	type AbstractObject = {
+		id: number (ID for entire group)
 		rank: number (for union by rank)
+		value: Value (pointers to abstract object must not form a cycle)
 	}
 	
+	\\\\
 */
 
 var analysisMemo = Object.create(null);
