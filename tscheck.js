@@ -518,7 +518,7 @@ function check(type, value, path, userPath, parentKey, tpath) {
 				}
 				if (type.numberIndexer && type.numberIndexer.type !== 'any') {
 					obj.propertyMap.forEach(function(name,objPrty) {
-						if (objPrty.enumerable && isNumberString(name) && 'value' in objPrty) {
+						if (isNumberString(name) && 'value' in objPrty) {
 							check(type.numberIndexer, objPrty.value, path + '[' + name + ']', userPath, value.key, tpath + '[number]')
 						}
 					})
@@ -646,7 +646,7 @@ function findSuggestions() {
 					return;
 				if (type.stringIndexer && prty.enumerable) // property covered by string indexer
 					return;
-				if (type.numberIndexer && isNumberString(name) && prty.enumerable) // property covered by number indexer
+				if (type.numberIndexer && isNumberString(name)) // property covered by number indexer
 					return;
 				if (skipPrty(obj,name)) // uninteresting property
 					return;
