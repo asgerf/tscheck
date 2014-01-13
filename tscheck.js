@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 var fs = require('fs');
-var tsconvert = require('./tsconvert');
+var tscore = require('./tscore');
 require('sugar');
 var Map = require('./map');
 var util = require('util');
@@ -38,7 +38,7 @@ var libFileText = fs.readFileSync(libFile, 'utf8');
 
 var LIB_ORIGIN = ">lib.d.ts"; // pad origin with ">" to ensure it does not collide with user input
 
-var typeDecl = tsconvert([
+var typeDecl = tscore([
 		{file: LIB_ORIGIN, text:libFileText},
 		{file: typeDeclFile, text:typeDeclText}
 	])
@@ -659,6 +659,57 @@ function findSuggestions() {
 			console.log('Suggestion: ' + qualify(tpath,name) + ' could be added to interface ' + optStr)
 		})
 	})
+}
+
+// --------------------------------------------
+// 		Print Coverage
+// --------------------------------------------
+
+var coverageReachable = 0;
+var coverageTotal = 0;
+
+function typeCoverageCall(call, r) {
+	call.typeParameters.forEach(function(tp) {
+		if (tp.constraint) {
+			typeCoverage(tp.constraint, false);
+		}
+	})
+	call.parameters.forEach(function(param) {
+		typeCoverage(param.type, false);
+	})
+	typeCoverage(call.returnType, false);
+}
+
+function typeCoverage(type, r) {
+	coverageTotal++;
+	switch (type.type) {
+		case 'object':
+			r = !!tpath2values.get(type.path);
+			if (r)
+				coverageReachable++;
+			for (var k in type.properties) {
+				typeCoverage(type.properties[k].type, r);
+			}
+			type.calls.forEach(function(call) {
+				typeCoverageCall(call, r);
+			})
+			if (type.stringIndexer)
+				typeCoverage(type.stringIndexer, r);
+			if (type.numberIndexer)
+				typeCoverage(type.numberIndexer, r);
+			break;
+		default:
+			if (r) {
+				coverageReachable++;
+			}
+	}
+}
+
+function printCoverage() {
+	for (var k in typeDecl.env) {
+		typeCoverage(typeDecl.env[k].object, false);
+	}
+	console.log("COVERAGE " + coverageReachable + " / " + coverageTotal + " = " + (coverageReachable / coverageTotal).toFixed(2) + "%");
 }
 
 // ------------------------------------------
@@ -1461,6 +1512,7 @@ function main() {
 	if (program.suggest) {
 		findSuggestions()
 	}
+	printCoverage();
 }
 
 main();
