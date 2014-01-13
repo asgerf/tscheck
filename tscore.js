@@ -126,9 +126,7 @@ function TString(value) {
 }
 
 // Object type.
-function TObject(qname, kind) {
-    if (typeof kind === 'undefined')
-        throw new Error("Missing kind for TObject")
+function TObject(qname, meta) {
 	this.qname = qname;
     this.properties = new Map;
     this.modules = new Map;
@@ -138,13 +136,14 @@ function TObject(qname, kind) {
     this.typeParameters = []
     this.brand = null;
     this.meta = {
-        kind: kind
+        kind: meta.kind,
+        origin: meta.origin
     }
 }
 TObject.prototype.getModule = function(name) {
 	var t = this.modules.get(name)
 	if (!t) {
-	    t = new TObject(null, 'module')
+	    t = new TObject(null, {kind:'module', origin:current_file})
 	    this.modules.put(name,t)
 	}
     t.origin = current_file
@@ -155,7 +154,7 @@ TObject.prototype.getMember = function(name, optional) {
 	if (!t) {
 	    t = {
             optional: !!optional,
-            type:new TObject(null, 'interface'),
+            type:new TObject(null, {kind:'interface', origin:current_file}),
             meta: {
                 origin: current_file
             }
@@ -368,7 +367,7 @@ function parseClass(node, constructorType, host) {
 	current_node = node;
 	var name = node.name.text()
     var qname = qualify(host, name)
-    var instanceType = new TObject(qname, 'class')
+    var instanceType = new TObject(qname, {kind:'class', origin:current_file})
     instanceType.brand = qname;
     var instanceRef = new TQualifiedReference(qname)
     
@@ -437,7 +436,7 @@ function parseClass(node, constructorType, host) {
 function parseInterface(node, host) {
 	current_node = node;
 	var qname = qualify(host, node.name.text());
-    var typ = new TObject(qname, 'interface')
+    var typ = new TObject(qname, {kind:'interface', origin:current_file})
     current_scope = new TTypeParameterScope(current_scope)
     node.typeParameters && node.typeParameters.members.forEach(function(tp,index) {
     	var name = tp.name.text()
@@ -530,7 +529,7 @@ function parseType(node) {
         return parseInterface(node)
     } 
     else if (node instanceof TypeScript.FunctionDeclaration) {
-    	var t = new TObject(null, 'interface');
+    	var t = new TObject(null, {kind:'interface', origin:current_file});
         t.calls.push(parseFunctionType(node))
         return t;
     }
@@ -624,7 +623,7 @@ function parseFunctionType(node) {
 var global_type;
 var current_file = '?';
 function parsingPhase() {
-    global_type = new TObject('', 'module');
+    global_type = new TObject('', {kind:'module', origin:''});
     extern_types = new Map;
     inputs.forEach(function (input) {
         current_file = input.file;
@@ -1182,7 +1181,7 @@ function substCall(call, tenv) {
 
 function substType(type, tenv) {
     if (type instanceof TObject) {
-        var t = new TObject(null, type.meta.kind)
+        var t = new TObject(null, type.meta)
         t.properties = type.properties.mapv(substProperty.fill(undefined,tenv))
         t.calls = type.calls.map(substCall.fill(undefined,tenv))
         t.brand = type.brand

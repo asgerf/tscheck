@@ -10,6 +10,7 @@ var program = require('commander');
 program.usage("FILE.jsnap FILE.d.ts [options]")
 program.option('--compact', 'Report at most one violation per type path')
 	   .option('--no-suggest', 'Do not suggest additions to the interface')
+	   .option('--coverage', 'Print declaration file coverage')
 program.parse(process.argv);
 
 if (program.args.length < 2) {
@@ -681,6 +682,8 @@ function typeCoverageCall(call, r) {
 }
 
 function typeCoverage(type, r) {
+	if (type.type === 'object' && type.meta.origin == LIB_ORIGIN)
+		return; // don't measure coverage inside lib.d.ts
 	coverageTotal++;
 	switch (type.type) {
 		case 'object':
@@ -709,7 +712,7 @@ function printCoverage() {
 	for (var k in typeDecl.env) {
 		typeCoverage(typeDecl.env[k].object, false);
 	}
-	console.log("COVERAGE " + coverageReachable + " / " + coverageTotal + " = " + (coverageReachable / coverageTotal).toFixed(2) + "%");
+	console.log("COVERAGE " + coverageReachable + " / " + coverageTotal + " = " + (100 * coverageReachable / coverageTotal).toFixed(2) + "%");
 }
 
 // ------------------------------------------
@@ -1512,7 +1515,9 @@ function main() {
 	if (program.suggest) {
 		findSuggestions()
 	}
-	printCoverage();
+	if (program.coverage) {
+		printCoverage();
+	}
 }
 
 main();
