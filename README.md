@@ -51,6 +51,7 @@ interface ObjectType {
 	brand: string | null // path to constructor
 	meta: {
 		kind: 'module' | 'class' | 'interface'
+		origin: string 			// which file contributed the type
 	}
 }
 interface Property {
