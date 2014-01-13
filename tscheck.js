@@ -9,8 +9,9 @@ var esprima = require('esprima');
 var program = require('commander');
 program.usage("FILE.jsnap FILE.d.ts [options]")
 program.option('--compact', 'Report at most one violation per type path')
-	   .option('--no-suggest', 'Do not suggest additions to the interface')
+	   .option('--suggest', 'Suggest additions to the interface')
 	   .option('--coverage', 'Print declaration file coverage')
+	   .option('--no-warn', 'Squelch type errors')
 program.parse(process.argv);
 
 if (program.args.length < 2) {
@@ -448,7 +449,9 @@ function reportError(msg, path, tpath) {
 		return
 	}
 	tpath2warning.put(tpath, true)
-	console.log((path || '<global>') + ": " + msg + append)
+	if (program.warn) {
+		console.log((path || '<global>') + ": " + msg + append)
+	}
 }
 
 var tpath2values = new Map;
@@ -663,11 +666,55 @@ function findSuggestions() {
 }
 
 // --------------------------------------------
-// 		Print Coverage
+// 		Coverage
 // --------------------------------------------
 
-var coverageReachable = 0;
-var coverageTotal = 0;
+var coverage = {
+	types: {
+		total: 0,
+		used: 0
+	},
+	names: {
+		total: 0,
+		used: 0
+	},
+	reachable: {} // names of reachable types in type environment
+}
+
+function reachableCall(call) {
+	call.typeParameters.forEach(function(tp) {
+		if (tp.constraint)
+			reachableType(tp.constraint)
+	})
+	call.parameters.forEach(function(p) {
+		reachableType(p.type)
+	})
+	reachableType(call.returnType)
+}
+function reachableType(type) {
+	switch (type.type) {
+		case 'object':
+			for (var k in type.properties) {
+				reachableType(type.properties[k].type)
+			}
+			type.calls.forEach(reachableCall)
+			if (type.stringIndexer)
+				reachableType(type.stringIndexer)
+			if (type.numberIndexer)
+				reachableType(type.numberIndexer)
+			break;
+		case 'reference':
+			type.typeArguments.forEach(reachableType)
+			if (!coverage.reachable[type.name]) {
+				coverage.reachable[type.name] = true;
+				var t = typeDecl.env[type.name]
+				if (t) {
+					reachableType(t.object);
+				}
+			}
+			break;
+	}
+}
 
 function typeCoverageCall(call, r) {
 	call.typeParameters.forEach(function(tp) {
@@ -684,35 +731,63 @@ function typeCoverageCall(call, r) {
 function typeCoverage(type, r) {
 	if (type.type === 'object' && type.meta.origin == LIB_ORIGIN)
 		return; // don't measure coverage inside lib.d.ts
-	coverageTotal++;
+	coverage.types.total++;
 	switch (type.type) {
 		case 'object':
 			r = !!tpath2values.get(type.path);
 			if (r)
-				coverageReachable++;
+				coverage.types.used++;
 			for (var k in type.properties) {
+				if (type.properties[k].meta.origin != LIB_ORIGIN) {
+					coverage.names.total++;
+					if (r) {
+						coverage.names.used++;
+					}
+				}
 				typeCoverage(type.properties[k].type, r);
 			}
-			type.calls.forEach(function(call) {
-				typeCoverageCall(call, r);
-			})
+			// we don't measure call signatures in this statistic
+			// type.calls.forEach(function(call) {
+			// 	typeCoverageCall(call, r);
+			// })
 			if (type.stringIndexer)
 				typeCoverage(type.stringIndexer, r);
 			if (type.numberIndexer)
 				typeCoverage(type.numberIndexer, r);
 			break;
+		case 'reference':
+			type.typeArguments.forEach(function(t) {
+				typeCoverage(t, r);
+			})
+			break;
 		default:
 			if (r) {
-				coverageReachable++;
+				coverage.types.used++;
 			}
 	}
 }
 
 function printCoverage() {
+	// Find reachable types
+	coverage.reachable[typeDecl.global] = true;
+	reachableType(typeDecl.env[typeDecl.global].object);
+
+	// Find type expressions checked by our procedure
 	for (var k in typeDecl.env) {
+		if (!coverage.reachable[k])
+			continue; // don't measure coverage for unused type definitions, it is meaningless to look for bugs in those
 		typeCoverage(typeDecl.env[k].object, false);
 	}
-	console.log("COVERAGE " + coverageReachable + " / " + coverageTotal + " = " + (100 * coverageReachable / coverageTotal).toFixed(2) + "%");
+	function percent(x,y) {
+		if (y === 0)
+			y = 1;
+		return (100 * x / y);
+	}
+	function str(cov) {
+		return cov.used + " / " + cov.total + " (" + percent(cov.used,cov.total).toFixed(2) + "%)";
+	}
+	console.log("TYPE COVERAGE " + str(coverage.types));
+	console.log("NAME COVERAGE " + str(coverage.names));
 }
 
 // ------------------------------------------

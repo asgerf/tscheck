@@ -1,5 +1,4 @@
 set -e
-selected_test=$1
 testdir="../tscheck-tests"
 decls=$(find $testdir -name "*.d.ts")
 for decl in $decls
@@ -8,11 +7,8 @@ do
 	snapshot="$prefix.jsnap"
 	name=$(basename $prefix)
 	if [[ -f $snapshot ]]; then
-		if [[ -z $selected_test || ($selected_test = $name) ]];
-		then
-			echo $name
-			./tscheck.js $snapshot $decl >output/$name.txt --compact
-		fi
+		echo $name
+		./tscheck.js $snapshot $decl >output/$name.txt --compact $*
 	fi
 	# snapshot="$name.jsnap"
 	# ./tscheck.js $snapshot $decl
