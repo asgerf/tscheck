@@ -282,6 +282,26 @@ function canonicalizeKey(key) {
 function escapeStringConst(str) {
 	return str; // todo, but only necessary in unrealistic circumstances
 }
+function canonicalizeValue(value) {
+	switch (typeof value) {
+		case 'function':
+		case 'object':
+			if (value === null)
+				return '_';
+			else
+				return '#' + value.key;
+		case 'boolean':
+			return value ? 't' : 'f';
+		case 'number':
+			return 'n:' + value
+		case 'string':
+			return 'C:' + escapeStringConst(value) // note: intentially coincide with string-const type
+		case 'undefined':
+			return 'u';
+		default:
+			throw new Error("unknown value " + util.inspect(value));
+	}
+}
 function canonicalizeCall(call) {
 	var buf = []
 	if (call.new)
@@ -346,6 +366,8 @@ function canonicalizeType(type) {
 			return 'V';
 		case 'enum':
 			return 'E:' + type.name;
+		case 'value':
+			return 'W:' + canonicalizeValue(type.value);
 		default:
 			throw new Error("Unrecognized type: " + util.inspect(type))
 	}
@@ -569,7 +591,7 @@ function check(type, value, path, userPath, parentKey, tpath) {
 			must(typeof value === 'number');
 			break;
 		case 'string':
-			must(typeof value === 'string'); // todo: instances of String
+			must(typeof value === 'string');
 			break;
 		case 'boolean':
 			must(typeof value === 'boolean');
@@ -660,7 +682,7 @@ function findSuggestions() {
 		names.forEach(function(name,count) {
 			var alwaysPresent = (count === values.length);
 			var optStr = alwaysPresent ? '' : '(optional)';
-			console.log('Suggestion: ' + qualify(tpath,name) + ' could be added to interface ' + optStr)
+			console.log(qualify(tpath,name) + ': missing from .d.ts ' + optStr)
 		})
 	})
 }
@@ -842,6 +864,8 @@ function formatType(type) {
 			return '"' + type.value + '"';
 		case 'enum':
 			return type.name;
+		case 'value':
+			return 'value(' + formatValue(type.value) + ')'
 	}
 	return util.inspect(type)
 }
@@ -1050,6 +1074,43 @@ function checkCallSignature(call, receiverKey, objKey, path) {
 	
 	\\\\
 */
+
+function AbstractState() {
+	this.variables = new Map
+	this.abstract = new Map
+}
+AbstractState.prototype.var = function(name, value) {
+	var k = '$' + name
+	if (arguments.length > 1) {
+		return this[k] = value
+	}
+	return this[k]
+}
+AbstractState.prototype.abstr = function(name, value) {
+	var k = '#' + name
+	if (arguments.length > 1) {
+		return this[k] = value
+	}
+	return this[k]
+}
+AbstractState.prototype.hash = function() {
+	if ('_hash' in this)
+		return this._hash
+	var bag = []
+	this.variables.forEach(function(name,t) {
+		bag.push(name + '=' + canonicalizeType(t))
+	})
+	this.abstract.forEach(function(name,t) {
+		bag.push(name + '=' + canonicalizeType(t))
+	})
+	bag.sort()
+	return this._hash = bag.join('|')
+}
+AbstractState.prototype.whenTrue = function(x) {
+	if (typeof x === 'string') {
+		
+	}
+}
 
 var analysisMemo = Object.create(null);
 function getMemo(node) {
