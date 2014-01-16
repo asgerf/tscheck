@@ -1121,6 +1121,8 @@ function getMemo(node) {
 	return memo;
 }
 
+function FunctionTooComplex() {}
+
 function analyzeFunction(node, env, receiver, args) { // [ Value ]
 	var variables = new Map
 	node.params.forEach(function(param,i) {
@@ -1151,7 +1153,15 @@ function analyzeFunction(node, env, receiver, args) { // [ Value ]
 		variables: variables,
 		abstract: new Map
 	}
-	analyzeStmtBlock(node.body, state)
+	try {
+		analyzeStmtBlock(node.body, state)
+	} catch (e) {
+		if (e instanceof FunctionTooComplex) {
+			return;
+		} else {
+			throw e;
+		}
+	}
 }
 function analyzeStmtBlock(nodes, state) { // [ { state : State, terminator?: Terminator } ]
 	var states = [state]
@@ -1173,72 +1183,83 @@ function analyzeStmtBlock(nodes, state) { // [ { state : State, terminator?: Ter
 	})
 	return result
 }
-function analyzeStmt(node, state) { // [ { state : State, terminator?: Terminator } ]
+function analyzeCondK(node, state, callbacks) {
+	var cond = analyzeCondition(node, state)
+	cond.whenTrue.forEach(callbacks.whenTrue)
+	cond.whenFalse.forEach(callbacks.whenFalse)
+}
+
+function fixp(node, state, fn) {
+	var memo = getMemo(node)
+	var h = state.hash()
+	var result = memo[h]
+	if (result)
+		return result;
+	memo[h] = []
+	result = []
+	function kontinue(r) {
+		result.push(r)
+	}
+	function loop(state, k) {
+		fixp(node,state,fn).forEach(k)
+	}
+	fn(state, kontinue, loop)
+	memo[h] = result
+	return result
+}
+
+function analyzeStmt(node, state, k) { // [ { state : State, terminator?: Terminator } ]
+	var result
+	if (typeof k === 'undefined') {
+		result = []
+		k = function(x) { result.push(x) }
+	}
 	switch (node.type) {
 		case 'EmptyStatement':
-			return [ { state:state } ]
+			k( { state:state } )
+			break;
 		case 'BlockStatement':
-			return analyzeStmtBlock(node.body, state)
+			analyzeStmtBlock(node.body, state, k)
+			break;
 		case 'ExpressionStatement':
-			return analyzeExp(node.expression, state).map(function(er) {
-				return {
-					state: er.state
-				}
-			})
+			analyzeExp(node.expression, state, function(er) { k(er.state) })
+			break;
 		case 'IfStatement':
-			var result = []
-			var cond = analyzeCondition(node.test, state)
-			cond.whenTrue.forEach(function(er) {
-				analyzeStmt(node.consequent, er.state).forEach(function(sr) {
-					result.push(sr)
-				})
-			})
-			cond.whenFalse.forEach(function(er) {
-				analyzeOptStmt(node.alternate || null, er.state).forEach(function(sr) {
-					result.push(sr)
-				})
-			})
-			return result
-		case 'LabeledStatement':
-			var memo = getMemo(node)
-			var h = hashState(state)
-			var result = memo[h]
-			if (result) {
-				return result
-			}
-			memo[h] = [] // cycles should initially assume empty set of outcomes
-			result = []
-			analyzeStmt(node.body, state).forEach(function(sr) {
-				if (sr.terminator && sr.terminator.label === node.label.name) {
-					if (sr.terminator.type === 'break') {
-						result.push({state:sr.state}) // clear break flag
-					} else { // 'continue'
-						// recursively analyze labeled statement
-						analyzeStmt(node, sr.state).forEach(function(sr) {
-							result.push(sr)
-						})
-					}
-				} else {
-					result.push(sr)
+			analyzeCondition(node.test, state, {
+				whenTrue: function(er) {
+					analyzeStmt(node.consequent, er.state, k)
+				},
+				whenFalse: function(er) {
+					analyzeOptStmt(node.alternate || null, er.state, k)
 				}
-			})
-			memo[h] = result
-			return result
+			}
+			break;
+		case 'LabeledStatement':
+			fixp(node, state, function(state, kontinue, loop) {
+				analyzeStmt(node.body, state, function(sr) {
+					if (sr.terminator && sr.terminator.label == node.label.name) {
+						if (sr.terminator.type === 'break')
+							kontinue({state:sr.state})
+						else
+							loop(sr.state, kontinue)
+					} else {
+						kontinue({sr.state})
+					}
+				})
+			}).forEach(k)
+			break;
 		case 'BreakStatement':
-			return [{
-				state: state,
-				terminator: { type: 'break', label: node.label ? node.label.name : '*' }
-			}]
+			k({ state: state,
+				terminator: { type: 'break', label: node.label ? node.label.name : '*' } })
+			break;
 		case 'ContinueStatement':
-			return [{
-				state: state,
-				terminator: { type: 'continue', label: node.label ? node.label.name : '*' }
-			}]
+			k({ state: state,
+				terminator: { type: 'continue', label: node.label ? node.label.name : '*' } }]
+			break;
 		case 'WithStatement':
-			throw new Error("With statement not supported")
+			throw new FunctionTooComplex
 		case 'SwitchStatement':
-			var result = []
-			analyzeExp(node.discriminant, state).forEach(function(dr) {
+			analyzeExp(node.discriminant, state, function(dr) {
 				var dvalue = dr.value
 				var testBranch = [dr.state]
 				var fallBranch = []
@@ -1247,74 +1268,93 @@ function analyzeStmt(node, state) { // [ { state : State, terminator?: Terminato
 					var nextFallBranch = []
 					function kontinue(sr) {
 						if (sr.terminator && sr.terminator.type === 'break' && sr.terminator.label === '*') {
-							result.push({state:sr.state}) // break out and clear terminator
+							k({state:sr.state}) // break out and clear terminator
 						} else if (sr.terminator) {
-							result.push(sr) // break out and preserve terminator
+							k(sr) // break out and preserve terminator
 						} else {
 							nextFallBranch.push(sr.state) // fall through to next clause
 						}
 					}
 					testBranch.forEach(function(state) {
 						if (caze.test) {
-							analyzeExp(caze.test, state).forEach(function(testr) {
-								testStrictEq(testr.value, dvalue, testr.state).forEach(function(cr) {
-									cr.whenTrue.forEach(function(er) {
-										analyzeStmtBlock(caze.consequent, er.state).forEach(kontinue)
-									})
-									cr.whenFalse.forEach(function(er) {
+							analyzeExp(caze.test, state, function(testr) {
+								testStrictEq(testr.value, dvalue, testr.state, {
+									whenTrue: function(er) {
+										analyzeStmtBlock(caze.consequent, er.state, kontinue)
+									},
+									whenFalse: function(er) {
 										nextTestBranch.push(er.state)
-									})
+									}
 								})
 							})
 						} else { // default clause
-							analyzeStmtBlock(caze.consequent, state).forEach(kontinue)
+							analyzeStmtBlock(caze.consequent, state, kontinue)
 						}
 					})
 					fallBranch.forEach(function(state) {
-						analyzeStmtBlock(caze.consequent, state).forEach(kontinue)
+						analyzeStmtBlock(caze.consequent, state, kontinue)
 					})
 					testBranch = nextTestBranch
 					fallBranch = nextFallBranch
 				})
 				testBranch.forEach(function(state) {
-					result.push({state:state})
+					k({state:state})
 				})
 				fallBranch.forEach(function(state) {
-					result.push({state:state})
+					k({state:state})
 				})
 			})
-			return result
+			break;
 		case 'ReturnStatement':
 			if (!node.argument) {
-				return [{
+				k({
 					state: state,
 					terminator: {
 						type: 'return',
 						value: { type: 'void' }
 					}
-				}]
+				})
+			} else {
+				analyzeExp(node.argument, state, function(er) {
+					k({ 
+						state: er.state,
+						terminator: {
+							type: 'return',
+							value: er.value
+						}
+					})
+				})
 			}
-			return analyzeExp(node.argument, state).map(function(er) {
-				return {
-					state: er.state,
-					terminator: {
-						type: 'return',
-						value: er.value
-					}
-				}
-			})
+			break;
 		case 'ThrowStatement':
-			return analyzeExp(node.argument, state).map(function(er) {
-				return {
+			analyzeExp(node.argument, state, function(er) {
+				k({
 					state: er.state,
 					terminator: {
 						type: 'throw'
 					}
-				}
+				})
 			})
+			break;
 		case 'TryStatement':
-			throw new Error("try statement not supported")
+			throw new FunctionTooComplex
 		case 'WhileStatement':
+			fixp(node, state, function(state, kontinue, loop) {
+				analyzeCondition(node.test, state, {
+					whenTrue: function(er) {
+						analyzeStmt(node.body, er.state, function(sr) {
+							
+						})
+					},
+					whenFalse: function(er) {
+
+					}
+				})
+			})
+			break;
+
+
+			///
 			var memo = getMemo(node)
 			var h = hashState(state)
 			var result = memo[h]
@@ -1477,6 +1517,7 @@ function analyzeStmt(node, state) { // [ { state : State, terminator?: Terminato
 		default:
 			throw new Error("Unrecognized statement: " + (node.type || util.inspect(node)))
 	}
+	return result
 }
 function analyzeOptStmt(node, state) {
 	if (!node)
