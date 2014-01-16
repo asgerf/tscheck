@@ -647,7 +647,7 @@ function skipPrty(obj, name) {
 		if (funProto.propertyMap.has(name))
 			return true; // don't suggest properties inherited from Function.prototype
 	}
-	if (name[0] === '_') // naming starting with underscore are almost always private
+	if (name[0] === '_') // names starting with underscore are almost always private
 		return true;
 	return false;
 }
