@@ -1,20 +1,68 @@
+#!/usr/bin/env node
 var esprima = require('esprima');
+var escodegen = require('escodegen');
 require('sugar');
 
+
+// Returns the given AST node's immediate children as an array.
+// Property names that start with $ are considered annotations, and will be ignored.
+function children(node) {
+    var result = [];
+    for (var k in node) {
+        if (!node.hasOwnProperty(k))
+            continue;
+        if (k[0] === '$')
+            continue;
+        var val = node[k];
+        if (!val)
+            continue;
+        if (typeof val === "object" && typeof val.type === "string") {
+            result.push(val);
+        }
+        else if (val instanceof Array) {
+            for (var i=0; i<val.length; i++) {
+                var elm = val[i];
+                if (typeof elm === "object" && typeof elm.type === "string") {
+                    result.push(elm);
+                }
+            }
+        } 
+    }
+    return result;
+}
+
+/*
+	Adds $break_target and $continue_target fields to the following nodes
+	- LabeledStatement
+	- ForStatement
+	- ForInStatement
+	- WhileStatement
+	- DoWhileStatement
+	- SwitchStatement
+*/
 function labelJumpTargets(ast) {
 	var breakTargets = []
 	var continueTargets = []
 	var labels = {}
+	var labelSet = []
 	function visit(node) {
 		function visitChildren() { 
+			var myLabels = labelSet
+			labelSet = null
+			myLabels && myLabels.forEach(function(l) {
+				labels[l] = node
+			})
 			children(node).forEach(visit)
+			myLabels && myLabels.forEach(function(l) {
+				delete labels[l]
+			})
 		}
 		switch (node.type) {
 			case 'BreakStatement':
 				if (!node.label) {
 					breakTargets.last().$break_target = true
 				} else {
-					labels[node.label].$break_target = true
+					labels[node.label.name].$break_target = true
 				}
 				visitChildren()
 				break;
@@ -22,15 +70,25 @@ function labelJumpTargets(ast) {
 				if (!node.label) {
 					continueTargets.last().$continue_target = true
 				} else {
-					labels[node.label].$continue_target = true
+					labels[node.label.name].$continue_target = true
 				}
 				visitChildren()
 				break;
 			case 'LabeledStatement':
-				var old_value = labels[node.label]
-				labels[node.label] = node
-				visitChildren()
-				labels[node.label] = old_value
+				labelSet = labelSet || []
+				labelSet.push(node.label.name)
+				if (node.body.type === 'ForStatement' || 
+					node.body.type === 'ForInStatement' || 
+					node.body.type === 'WhileStatement' || 
+					node.body.type === 'DoWhileStatement' || 
+					node.body.type === 'SwitchStatement' ||
+					node.body.type === 'LabeledStatement') {
+					// add to label set of child and handle it there
+					labelSet.push(node.label.name)
+					visit(node.body, labelSet)
+				} else {
+					visitChildren()
+				}
 				break;
 			case 'ForStatement':
 			case 'ForInStatement':
@@ -54,20 +112,18 @@ function labelJumpTargets(ast) {
 	visit(ast)
 }
 
-/*
-	interface info {
-		next_label: int
-		break?: int
-		continue?: int
-	}
-*/
-
+// The statement `label: stmt` unless label is null, in which case stmt is returned
 function labeledStmt(label, stmt) {
 	if (label === null)
 		return stmt
 	else
-		return { type: 'LabeledStatement', label: label, body: stmt }
+		return { type: 'LabeledStatement', label: { type: 'Identifier', name: label }, body: stmt }
+		// return { type: 'BlockStatement', body: [{ type: 'LabeledStatement', label: label, body: stmt }] }
 }
+
+// The given array of statements as a block statement. Empty statements will be excluded
+// from the block. If the resulting block is empty, an empty statement is returned instead,
+// and if the block consists of only one statement, that statement is returned (not as a block)
 function block(stmts) {
 	stmts = stmts.filter(function(stmt) { return stmt.type !== 'EmptyStatement '})
 	if (stmts.length === 0)
@@ -78,25 +134,53 @@ function block(stmts) {
 		return { type: 'BlockStatement', body: stmts }
 }
 
+// Normalizes the given AST by eliminating the following control structures:
+// - Continue statements
+// - Unlabeled break statements
+// - For statements
+//
+// Notably, the following control structures are still in the AST (and will be inserted in place of those that were eliminated):
+// - Labeled breaks
+// - Labeled statements (only targeted by breaks)
+// - For-in statements
+// - While statements
+// - Do-while statements
 function normalize(ast) {
+	labelJumpTargets(ast)
 	var next_label = 1
 	var breaks = []
 	var continues = []
 	var labeled_continues = {}
+	var labeled_breaks = {}
+	var label_set = []
 	function makeLabels(node, fn) {
 		var b = null, c = null;
+		var extra_labels = label_set
+		label_set = []
 		if (node.$break_target) {
 			breaks.push(b = '$' + next_label++)
+			extra_labels.forEach(function(l) {
+				labeled_breaks[l] = b
+			})
 		}
 		if (node.$continue_target) {
 			continues.push(c = '$' + next_label++)
+			extra_labels.forEach(function(l) {
+				labeled_continues[l] = c
+			})
 		}
 		var r = fn(b,c)
 		if (node.$break_target) {
 			breaks.pop()
+			extra_labels.forEach(function(l) {
+				labeled_breaks[l] = null
+			})
 		}
 		if (node.$continue_target) {
 			continues.pop()
+			extra_labels.forEach(function(l) {
+				labeled_continues[l] = null
+			})
 		}
 		return r
 	}
@@ -105,18 +189,25 @@ function normalize(ast) {
 			case 'ForStatement':
 				return makeLabels(node, function(b,c) {
 					var init;
-					if (node.init == null)
+					if (node.init === null)
 						init = { type: 'EmptyStatement' }
 					else if (node.init.type === 'VariableDeclaration')
 						init = visit(node.init)
 					else
 						init = { type: 'ExpressionStatement', expression: visit(node.init) }
+					var update;
+					if (node.update === null)
+						update = { type: 'EmptyStatement' }
+					else
+						update = { type: 'ExpressionStatement', expression: visit(node.update) }
 					return block([
 						init,
 						labeledStmt(b, {
 							type: 'WhileStatement',
 							test: node.test ? visit(node.test) : { type: 'Literal', value: true },
-							body: labeledStmt(c, visit(node.body))
+							body: block([
+								labeledStmt(c, visit(node.body)),
+								update])
 						})
 					])
 				})
@@ -137,51 +228,107 @@ function normalize(ast) {
 					})
 				})
 			case 'ForInStatement':
-				
-			case 'LabeledStatement':
-				if (node.label[0] === '$') {
-					node.label = '$' + node.label;
-				}
-				if (node.$continue_target) {
-					var old = labeled_continues[node.label]
-					var b = node.$break_target ? node.label : null;
-					var c = labeled_continues[node.label] = '$' + next_label++
-					var r = labeledStmt(b, {
-						type: 'WhileStatement',
-						test: { type: 'Literal', value: true },
-						body: 
-							labeledStmt(c, 
-								block([
-									visit(node.body),
-									{ type: 'BreakStatement', label: b }
-								])
-							)
+				return makeLabels(node, function(b,c) {
+					return labeledStmt(b, {
+						type: 'ForInStatement',
+						left: visit(node.left),
+						right: visit(node.right),
+						body: labeledStmt(c, visit(node.body))
 					})
-					labeled_continues[node.label] = old
-					return r;
+				})
+			case 'LabeledStatement':
+				if (node.label.name[0] === '$') {
+					node.label.name = '$' + node.label.name;
+				}
+				if (node.body.type === 'ForStatement' || 
+					node.body.type === 'ForInStatement' || 
+					node.body.type === 'WhileStatement' || 
+					node.body.type === 'DoWhileStatement' || 
+					node.body.type === 'SwitchStatement' ||
+					node.body.type === 'LabeledStatement') {
+					// add to label set and let child handle it
+					label_set.push(node.label.name)
+					return visit(node.body)
 				} else {
+					node.body = visit(node.body)
 					return node; // only used for labeled break, no rewrite necessary
 				}
+			case 'SwitchStatement':
+				return makeLabels(node, function(b,c) {
+					node.discriminant = visit(node.discriminant)
+					node.cases = node.cases.map(visit)
+					return labeledStmt(b, node)
+				})
 			case 'BreakStatement':
 				if (node.label) {
-					if (node.label[0] === '$')
-						node.label = '$' + node.label
+					if (node.label.name[0] === '$')
+						node.label.name = '$' + node.label.name
+					node.label.name = labeled_breaks[node.label.name] || node.label.name
 				} else {
-					node.label = breaks.last()
+					node.label = { type: 'Identifier', name: breaks.last() }
 				}
 				return node;
 			case 'ContinueStatement':
 				if (node.label) {
-					if (node.label[0] === '$')
-						node.label = '$' + node.label
+					if (node.label.name[0] === '$')
+						node.label.name = '$' + node.label.name
 					node.type = 'BreakStatement';
-					node.label = labeled_continues[node.label]
+					node.label.name = labeled_continues[node.label.name]
 				} else {
 					node.type = 'BreakStatement';
-					node.label = continues.last()
+					node.label = { type: 'Identifier', name: continues.last() }
 				}
 				return node;
-
+			default:
+				// recurse on all children
+				for (var k in node) {
+					if (k[0] === '$')
+						continue;
+					var v = node[k]
+					if (v instanceof Array) {
+						for (var i=0; i<v.length; i++) {
+							var vi = v[i];
+							if (vi && vi.type) {
+								v[i] = visit(vi)
+							}
+						}
+					} else if (v && v.type) {
+						node[k] = visit(v)
+					}
+				}
+				return node
 		}
 	}
+	return visit(ast)
+}
+
+
+module.exports = normalize
+
+// ===========================
+//  Entry Point
+// ===========================
+function main() {
+	var program = require('commander');
+	var fs = require('fs')
+	var util = require('util')
+
+	program.option('--struct', 'Print AST structure instead of source code')
+	program.usage('FILE.js [options]')
+	program.parse(process.argv)
+	if (program.args.length < 1)
+		program.help()
+
+	var text = fs.readFileSync(program.args[0], 'utf8')
+	var ast = esprima.parse(text)
+	ast = normalize(ast)
+	if (program.struct) {
+		console.log(util.inspect(ast, {depth:null}))
+	} else {
+		console.log(escodegen.generate(ast))
+	}
+}
+
+if (require.main === module) {
+	main();
 }

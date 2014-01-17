@@ -1,0 +1,17 @@
+outdir="output/normtests"
+rm -rf $outdir
+mkdir -p $outdir
+for file in normtests/*.js
+do
+	name=`basename $file`
+	node jsnorm.js $file >$outdir/$name # normalize JavaScript
+	node $file > $outdir/$name-orig.out # run original
+	node $outdir/$name > $outdir/$name-norm.out # run normalized
+	diff "$outdir/$name-orig.out" "$outdir/$name-norm.out" >/dev/null # compare output
+	if [ $? -eq 0 ]; then
+		echo "OK   $name"
+	else
+		echo "FAIL $name"
+	fi
+done
+

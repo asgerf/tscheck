@@ -1440,10 +1440,16 @@ function convert(arg) {
 
 function main() {
     var program = require('commander')
-    program.option('--pretty')
-        .option('--silent')
-        .option('--lib')
+    program.usage('FILE.d.ts... [options]')
+    program.commandHelp = function() { return "  Convert *.d.ts files to TypeScript Declaration Core\n" }
+    program.option('--pretty', 'Print pretty JSON, for human inspection')
+        .option('--silent', 'Print nothing')
+        .option('--lib', "Include TypeScript\'s lib.d.ts file")
     program.parse(process.argv)
+
+    if (program.args.length < 1) {
+        program.help()
+    }
 
     var inputs = program.args.map(function(file) {
         return {
