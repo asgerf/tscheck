@@ -255,6 +255,18 @@ function normalize(ast) {
 				}
 			case 'SwitchStatement':
 				return makeLabels(node, function(b,c) {
+					var init;
+					var discvar;
+					if (node.discriminant.type === 'Identifier') {
+						init = { type: 'EmptyStatement' }
+						discvar = node.discriminant.name
+					} else {
+						init = { type: 'VariableDeclaration', declarations: [ {
+							type: 'VariableDeclarator',
+							
+						} ] }
+					}
+					var discr = node.discriminant.type === 'Identifier' : 
 					node.discriminant = visit(node.discriminant)
 					node.cases = node.cases.map(visit)
 					return labeledStmt(b, node)
