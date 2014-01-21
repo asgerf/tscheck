@@ -137,6 +137,7 @@ function block(stmts) {
 // - Continue statements
 // - Unlabeled break statements
 // - For statements
+// - Switch statements
 //
 // Notably, the following control structures are still in the AST (and will be inserted in place of those that were eliminated):
 // - Labeled breaks
