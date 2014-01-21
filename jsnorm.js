@@ -118,7 +118,6 @@ function labeledStmt(label, stmt) {
 		return stmt
 	else
 		return { type: 'LabeledStatement', label: { type: 'Identifier', name: label }, body: stmt }
-		// return { type: 'BlockStatement', body: [{ type: 'LabeledStatement', label: label, body: stmt }] }
 }
 
 // The given array of statements as a block statement. Empty statements will be excluded
@@ -147,6 +146,7 @@ function block(stmts) {
 // - Do-while statements
 function normalize(ast) {
 	labelJumpTargets(ast)
+	var next_var = 1
 	var next_label = 1
 	var breaks = []
 	var continues = []
@@ -184,7 +184,10 @@ function normalize(ast) {
 		}
 		return r
 	}
-	function visit(node) {
+	function visitX(node, parent) {
+		function visit(n) {
+			return visitX(n, node)
+		}
 		switch (node.type) {
 			case 'ForStatement':
 				return makeLabels(node, function(b,c) {
@@ -255,21 +258,61 @@ function normalize(ast) {
 				}
 			case 'SwitchStatement':
 				return makeLabels(node, function(b,c) {
-					var init;
-					var discvar;
-					if (node.discriminant.type === 'Identifier') {
-						init = { type: 'EmptyStatement' }
-						discvar = node.discriminant.name
-					} else {
-						init = { type: 'VariableDeclaration', declarations: [ {
+					var casevar = '$' + next_var++;
+					var discvar = '$' + next_var++;
+					var stmts = []
+					stmts.push({
+						type: 'VariableDeclaration',
+						kind: 'var',
+						declarations: [{
 							type: 'VariableDeclarator',
-							
-						} ] }
-					}
-					var discr = node.discriminant.type === 'Identifier' : 
-					node.discriminant = visit(node.discriminant)
-					node.cases = node.cases.map(visit)
-					return labeledStmt(b, node)
+							id: { type: 'Identifier', name: casevar },
+							init: { type: 'Literal', value: false }
+						}, {
+							type: 'VariableDeclarator',
+							id: { type: 'Identifier', name: discvar },
+							init: visit(node.discriminant)
+						}]
+					})
+					var defaultReached = false;
+					node.cases.forEach(function(caze) {
+						if (caze.test) {
+							stmts.push({
+								type: 'ExpressionStatement',
+								expression: {
+									type: 'AssignmentExpression',
+									operator: '=',
+									left: { type: 'Identifier', name: casevar },
+									right: {
+										type: 'BinaryExpression',
+										operator: '||',
+										left: { type: 'Identifier', name: casevar },
+										right: {
+											type: 'BinaryExpression',
+											operator: '===',
+											left: { type: 'Identifier', name: discvar },
+											right: visit(caze.test)
+										}
+									}
+								}
+							})
+						} else {
+							defaultReached = true
+						}
+						if (caze.consequent.length > 0) {
+							if (defaultReached) {
+								stmts.push(block(caze.consequent.map(visit)))
+							} else {
+								stmts.push({
+									type: 'IfStatement',
+									test: { type: 'Identifier', name: casevar },
+									consequent: block(caze.consequent.map(visit)),
+									alternate: null
+								})
+							}
+						}
+					})
+					return labeledStmt(b, block(stmts))
 				})
 			case 'BreakStatement':
 				if (node.label) {
@@ -289,6 +332,29 @@ function normalize(ast) {
 				} else {
 					node.type = 'BreakStatement';
 					node.label = { type: 'Identifier', name: continues.last() }
+				}
+				return node;
+			case 'Identifier':
+				var isVariableName = true;
+				switch (parent.type) {
+			        case 'MemberExpression':
+			            if (!parent.computed && parent.property === node) {
+			            	isVariableName = false;
+			            }
+			            break;
+			        case 'Property':
+			        	if (parent.key === node) {
+			        		isVariableName = false;
+			        	}
+			            break;
+			        case 'BreakStatement':
+			        case 'ContinueStatement':
+			        case 'LabeledStatement':
+			        	isVariableName = false;
+			            break;
+				}
+				if (isVariableName && node.name[0] === '$') {
+					node.name = '$' + node.name; // disambiguate variable name
 				}
 				return node;
 			default:
@@ -311,7 +377,7 @@ function normalize(ast) {
 				return node
 		}
 	}
-	return visit(ast)
+	return visitX(ast)
 }
 
 
@@ -320,12 +386,20 @@ module.exports = normalize
 // ===========================
 //  Entry Point
 // ===========================
+function censorAnnotations(k,v) {
+	if (k && k[0] === '$')
+		return undefined
+	else
+		return v;
+}
+
 function main() {
 	var program = require('commander');
 	var fs = require('fs')
 	var util = require('util')
 
 	program.option('--struct', 'Print AST structure instead of source code')
+	program.option('--json', 'Print AST structure as JSON')
 	program.usage('FILE.js [options]')
 	program.parse(process.argv)
 	if (program.args.length < 1)
@@ -334,7 +408,9 @@ function main() {
 	var text = fs.readFileSync(program.args[0], 'utf8')
 	var ast = esprima.parse(text)
 	ast = normalize(ast)
-	if (program.struct) {
+	if (program.json) {
+		console.log(JSON.stringify(ast, censorAnnotations))
+	} else if (program.struct) {
 		console.log(util.inspect(ast, {depth:null}))
 	} else {
 		console.log(escodegen.generate(ast))
