@@ -1120,6 +1120,24 @@ function getMemo(node) {
 	}
 	return memo;
 }
+function fixp(node, state, fn) {
+	var memo = getMemo(node)
+	var h = state.hash()
+	var result = memo[h]
+	if (result)
+		return result;
+	memo[h] = []
+	result = []
+	function kontinue(r) {
+		result.push(r)
+	}
+	function loop(state, k) {
+		fixp(node,state,fn).forEach(k)
+	}
+	fn(state, kontinue, loop)
+	memo[h] = result
+	return result
+}
 
 function FunctionTooComplex() {}
 
@@ -1163,7 +1181,7 @@ function analyzeFunction(node, env, receiver, args) { // [ Value ]
 		}
 	}
 }
-function analyzeStmtBlock(nodes, state) { // [ { state : State, terminator?: Terminator } ]
+function analyzeStmtBlock(nodes, state, k) { // [ { state : State, terminator?: Terminator } ]
 	var states = [state]
 	var result = []
 	nodes.forEach(function(node) {
@@ -1179,32 +1197,8 @@ function analyzeStmtBlock(nodes, state) { // [ { state : State, terminator?: Ter
 		states = next
 	})
 	states.forEach(function(x) {
-		result.push(x)
+		k(x)
 	})
-	return result
-}
-function analyzeCondK(node, state, callbacks) {
-	var cond = analyzeCondition(node, state)
-	cond.whenTrue.forEach(callbacks.whenTrue)
-	cond.whenFalse.forEach(callbacks.whenFalse)
-}
-
-function fixp(node, state, fn) {
-	var memo = getMemo(node)
-	var h = state.hash()
-	var result = memo[h]
-	if (result)
-		return result;
-	memo[h] = []
-	result = []
-	function kontinue(r) {
-		result.push(r)
-	}
-	function loop(state, k) {
-		fixp(node,state,fn).forEach(k)
-	}
-	fn(state, kontinue, loop)
-	memo[h] = result
 	return result
 }
 
@@ -1235,75 +1229,52 @@ function analyzeStmt(node, state, k) { // [ { state : State, terminator?: Termin
 			}
 			break;
 		case 'LabeledStatement':
+			analyzeStmt(node.body, state, function(sr) {
+				if (sr.terminator && sr.terminator.type === 'break' && sr.terminator.label == node.label.name) {
+					k({state: sr.state})
+				} else {
+					k(sr)
+				}
+			})
+			break;
+		case 'WhileStatement':
+			fixp(node, state, function(state, kontinue, loop) {
+				analyzeCondition(node.test, state, {
+					whenTrue: function(er) {
+						analyzeStmt(node.body, er.state, function(sr) {
+							if (sr.terminator)
+								kontinue(sr)
+							else
+								loop(sr.state, kontinue)
+						})
+					},
+					whenFalse: function(er) {
+						kontinue({state: er.state})
+					}
+				})
+			}).forEach(k)
+			break;
+		case 'DoWhileStatement':
 			fixp(node, state, function(state, kontinue, loop) {
 				analyzeStmt(node.body, state, function(sr) {
-					if (sr.terminator && sr.terminator.label == node.label.name) {
-						if (sr.terminator.type === 'break')
-							kontinue({state:sr.state})
-						else
-							loop(sr.state, kontinue)
-					} else {
-						kontinue({sr.state})
+					if (sr.terminator)
+						kontinue(sr)
+					else {
+						analyzeCondition(node.test, er.state, {
+							whenTrue: function(er) {
+								loop(er.state, kontinue)
+							},
+							whenFalse: function(er) {
+								kontinue({state: er.state})
+							}
+						})
 					}
 				})
 			}).forEach(k)
 			break;
 		case 'BreakStatement':
 			k({ state: state,
-				terminator: { type: 'break', label: node.label ? node.label.name : '*' } })
-			break;
-		case 'ContinueStatement':
-			k({ state: state,
-				terminator: { type: 'continue', label: node.label ? node.label.name : '*' } }]
-			break;
-		case 'WithStatement':
-			throw new FunctionTooComplex
-		case 'SwitchStatement':
-			analyzeExp(node.discriminant, state, function(dr) {
-				var dvalue = dr.value
-				var testBranch = [dr.state]
-				var fallBranch = []
-				node.cases.forEach(function(caze) {
-					var nextTestBranch = []
-					var nextFallBranch = []
-					function kontinue(sr) {
-						if (sr.terminator && sr.terminator.type === 'break' && sr.terminator.label === '*') {
-							k({state:sr.state}) // break out and clear terminator
-						} else if (sr.terminator) {
-							k(sr) // break out and preserve terminator
-						} else {
-							nextFallBranch.push(sr.state) // fall through to next clause
-						}
-					}
-					testBranch.forEach(function(state) {
-						if (caze.test) {
-							analyzeExp(caze.test, state, function(testr) {
-								testStrictEq(testr.value, dvalue, testr.state, {
-									whenTrue: function(er) {
-										analyzeStmtBlock(caze.consequent, er.state, kontinue)
-									},
-									whenFalse: function(er) {
-										nextTestBranch.push(er.state)
-									}
-								})
-							})
-						} else { // default clause
-							analyzeStmtBlock(caze.consequent, state, kontinue)
-						}
-					})
-					fallBranch.forEach(function(state) {
-						analyzeStmtBlock(caze.consequent, state, kontinue)
-					})
-					testBranch = nextTestBranch
-					fallBranch = nextFallBranch
-				})
-				testBranch.forEach(function(state) {
-					k({state:state})
-				})
-				fallBranch.forEach(function(state) {
-					k({state:state})
-				})
-			})
+				terminator: { type: 'break', label: node.label.name } })
 			break;
 		case 'ReturnStatement':
 			if (!node.argument) {
@@ -1336,163 +1307,6 @@ function analyzeStmt(node, state, k) { // [ { state : State, terminator?: Termin
 				})
 			})
 			break;
-		case 'TryStatement':
-			throw new FunctionTooComplex
-		case 'WhileStatement':
-			fixp(node, state, function(state, kontinue, loop) {
-				analyzeCondition(node.test, state, {
-					whenTrue: function(er) {
-						analyzeStmt(node.body, er.state, function(sr) {
-							
-						})
-					},
-					whenFalse: function(er) {
-
-					}
-				})
-			})
-			break;
-
-
-			///
-			var memo = getMemo(node)
-			var h = hashState(state)
-			var result = memo[h]
-			if (result) {
-				return result
-			}
-			memo[h] = []
-			result = []
-			analyzeCondition(node.test, state).forEach(function(cr) {
-				cr.whenTrue.forEach(function(er) {
-					analyzeStmt(node.body, er.state).forEach(function(sr) {
-						if (sr.terminator && sr.terminator.label === '*') {
-							if (sr.terminator.type === 'break') {
-								result.push({state:sr.state}) // clear terminator
-							} else { // 'continue'
-								analyzeStmt(node, sr.state).forEach(function(sr) {  // recursively analyze while loop
-									result.push(sr)
-								})
-							}
-						} else if (sr.terminator) {
-							result.push(sr)
-						} else {
-							analyzeStmt(node, sr.state).forEach(function(sr) {  // recursively analyze while loop
-								result.push(sr)
-							})
-						}
-					})
-				})
-				cr.whenFalse.forEach(function(er) {
-					result.push({state:er.state})
-				})
-			})
-			memo[h] = result
-			return result
-		case 'DoWhileStatement':
-			var memo = getMemo(node)
-			var h = hashState(state)
-			var result = memo[h]
-			if (result) {
-				return result
-			}
-			memo[h] = []
-			result = []
-			analyzeStmt(node.body, state).forEach(function(sr) {
-				if (sr.terminator && sr.terminator.label === '*') {
-					if (sr.terminator.type === 'break') {
-						result.push({state:sr.state}) // clear terminator
-					} else { // 'continue'
-						analyzeStmt(node, sr.state).forEach(function(sr) {  // recursively analyze do-while loop
-							result.push(sr)
-						})
-					}
-				} else if (sr.terminator) {
-					result.push(sr)
-				} else {
-					analyzeCondition(node.test, sr.state).forEach(function(cr) {
-						cr.whenTrue.forEach(function(er) {
-							analyzeStmt(node, er.state).forEach(function(sr) {  // recursively analyze do-while loop
-								result.push(sr)
-							})
-						})
-						cr.whenFalse.forEach(function(er) {
-							result.push({state:er.state})
-						})
-					})
-				}
-			})
-			memo[h] = result
-			return result
-		case 'ForStatement':
-			var initStates = []
-			if (node.init === null) {
-				initStates.push(state)
-			} else if (node.init.type === 'VariableDeclaration') {
-				analyzeStmt(node.init, state).forEach(function(sr) {
-					initStates.push(sr.state) // note: variable declaration cannot produce a terminator
-				})
-			} else { // expression
-				analyzeExp(node.init, state).forEach(function(er) {
-					initStates.push(er.state)
-				})
-			}
-			var memo = getMemo(node)
-			function analyzeLoop(state) {
-				var h = hashState(state)
-				var result = memo[h]
-				if (result) {
-					return result
-				}
-				memo[h] = []
-				var cond;
-				if (node.test) {
-					cond = analyzeCondition(node.test, state)
-				} else {
-					cond = { whenTrue: [{state:state}], whenFalse:[] }
-				}
-				cond.whenTrue.forEach(function(er) {
-					var afterUpdate;
-					if (node.update) {
-						afterUpdate = analyzeExp(node.update, er.state)
-					} else {
-						afterUpdate = [er]
-					}
-					afterUpdate.forEach(function(er) {
-						analyzeStmt(node.body, er.state).forEach(function(sr) {
-							if (sr.terminator && sr.terminator.label === '*') {
-								if (sr.terminator.type === 'break') {
-									result.push({state:sr.state}) // clear terminator
-								} else { // 'continue'
-									analyzeLoop(sr.state).forEach(function(sr) { // recursively analyze loop part
-										result.push(sr)
-									})
-								}
-							} else if (sr.terminator) {
-								result.push(sr) // preserve terminator
-							} else {
-								analyzeLoop(sr.state).forEach(function(sr) { // recursively analyze loop part
-									result.push(sr)
-								})
-							}
-						})
-					})
-				})
-				cond.whenFalse.forEach(function(er) {
-					result.push({state:er.state})
-				})
-				memo[h] = result
-				return result
-			}
-			var outerResult = []
-			initStates.forEach(function(state) {
-				analyzeLoop(state).forEach(function(sr) {
-					outerResult.push(sr)
-				})
-			})
-			return outerResult
-		case 'ForInStatement':
-			throw new Error("For-in loop not supported")
 		case 'VariableDeclaration':
 		 	var states = [state]
 		 	node.declarations.forEach(function(decl) {
@@ -1512,6 +1326,12 @@ function analyzeStmt(node, state, k) { // [ { state : State, terminator?: Termin
 		 	return states.map(function(state) {
 		 		return {state:state}
 		 	})
+		case 'ForInStatement':
+			throw new FunctionTooComplex
+		case 'WithStatement':
+			throw new FunctionTooComplex
+		case 'TryStatement':
+			throw new FunctionTooComplex
 		case 'FunctionDeclaration':
 			throw new Error("Inner functions not supported")
 		default:
@@ -1519,11 +1339,11 @@ function analyzeStmt(node, state, k) { // [ { state : State, terminator?: Termin
 	}
 	return result
 }
-function analyzeOptStmt(node, state) {
+function analyzeOptStmt(node, state, k) {
 	if (!node)
-		return [{state:state}]
+		return k({state:state})
 	else
-		return analyzeStmt(node,state)
+		return analyzeStmt(node,state,k)
 }
 var EmptyObjectType = {
 	type: 'object',
