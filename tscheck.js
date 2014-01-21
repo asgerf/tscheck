@@ -1353,50 +1353,26 @@ var EmptyObjectType = {
 	numberIndexer: null,
 	meta: {kind: 'interface'}
 }
-function analyzeExp(node, state) { // [ { state : State, value : Value } ]
+function analyzeExp(node, state, k) { // [ { state : State, value : Value } ]
 	switch (node.type) {
 		case 'ThisExpression':
-			return [{
-				state: state,
-				value: state.this
-			}]
+			k({state:state, value:state.this()})
+			break;
 		case 'ArrayExpression':
-			var statexs = [{
-				state: state,
-				elements: []
-			}]
-			node.elements.forEach(function(elm) {
-				if (!elm)
-					return;
-				var nextStatexs = []
-				statexs.forEach(function(stx) {
-					analyzeExp(elm, stx.states).forEach(function(er) {
-						if (er.value.type === 'void') {
-							nextStatexs.push({
-								state: er.state,
-								elements: stx.elements
-							})
-						} else {
-							nextStatexs.push({
-								state: er.state,
-								elements: stx.elements.concat([er.value])
-							})
-						}
+			function visitArray(i, state, values) {
+				if (i === node.elements.length) {
+					var t = bestCommonType(values)
+					k({state: state, value: {type: 'reference', name:'Array', typeArguments:[t]})
+				} else if (node.elements[i] === null) {
+					visitArray(i+1, state);
+				} else {
+					analyzeExp(node.elements[i], function(er) {
+						visitArray(i+1, er.state, values.concat([er.value]))
 					})
-				})
-				statexs = nextStatexs
-			})
-			return statexs.map(function(stx) {
-				var t = stx.elements.length === 0 ? {type:'abstract', id:node.$id} : bestCommonType(stx.elements);
-				return {
-					state: stx.state,
-					value: {
-						type: 'reference',
-						name: 'Array',
-						typeArguments: [t]
-					}
 				}
-			})
+			}
+			visitArray(0, state, values)
+			break;
 		case 'ObjectExpression':
 			var statexs = [{
 				state: state,
