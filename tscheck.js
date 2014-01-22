@@ -452,6 +452,27 @@ function coerceToObject(x) {
 	}
 }
 
+function coerceTypeToObject(x) {
+	switch (x.type) {
+		case 'number': return {type: 'reference', name:'Number'}
+		case 'string': return {type: 'reference', name:'String'}
+		case 'string-const': return {type: 'reference', name:'String'}
+		case 'boolean': return {type: 'reference', name:'Boolean'}
+		case 'value':
+			if (x.value && typeof x.value === 'object') {
+				var obj = lookupObject(x.value.key)
+				var t = {type: 'object', properties: {}, calls: [], stringIndexer: null, numberIndexer: null}
+				obj.propertyMap.forEach(function(prty) {
+					t.properties[prty.name] = {
+						optional: false,
+						type: { type: 'value', value: prty.value }
+					}
+				})
+				return t
+			}
+		default: return x
+	}
+}
 
 
 // ------------------------------------------------------------
@@ -631,6 +652,72 @@ function hasBrand(value, brand) {
 		value = lookupObject(value.key).prototype
 	}
 	return false;
+}
+
+// --------------------
+// 		Subtyping
+// --------------------
+
+var subtype_assumptions = Object.create(null);
+function isSubtypeOf(x, y) { // x <: y
+	switch (y.type) {
+		case 'object':
+			// x <: {..}
+			x = coerceTypeToObject(x)
+			if (x.type === 'reference') {
+				x = lookupQType(x.name, x.typeArguments)
+			}
+			if (x.type !== 'object')
+				return false;
+			for (var k in y.properties) {
+				if (!x.hasOwnProperty(k))
+					return false
+				if (x.properties[k].optional && !y.properties[k].optional) {
+					return false // {f?:T} is not subtype of {f:T}
+				}
+				if (!isSubtypeOf(x.properties[k].type, y.properties[k].type)) {
+					return false
+				}
+			}
+			if (y.stringIndexer) {
+				if (!x.stringIndexer)
+					return false
+				if (!isSubtypeOf(x.stringIndexer, y.stringIndexer))
+					return false
+			}
+			if (y.numberIndexer) {
+				if (!x.numberIndexer)
+					return false
+				if (!isSubtypeOf(x.numberIndexer, y.numberIndexer))
+					return false
+			}
+			// TODO: call signatures?
+			return true
+		case 'reference':
+			var key = canonicalizeType(x) + '~' + canonicalizeType(y)
+			if (key in subtype_assumptions)
+				return subtype_assumptions[key]
+			subtype_assumptions[key] = true
+			return subtype_assumptions[key] = isSubtypeOf(x, lookupQType(y.name, y.typeArguments))
+		case 'enum':
+			return (x.type === 'enum' && x.name === y.name)
+		case 'string-const':
+			return (x.type === 'string-const' && x.value === y.value)
+		case 'number':
+			return (x.type === 'number')
+		case 'string':
+			return (x.type === 'string' || x.type === 'string-const')
+		case 'boolean':
+			return (x.type === 'boolean')
+		case 'any':
+			return true;
+		case 'void':
+			return (x.type === 'void')
+		case 'type-param':
+			throw new Error("Checking subtype vs unbound type parameter: " + util.inspect(y))
+		default:
+			throw new Error("Unrecognized type type: " + y.type + " " + util.inspect(y))
+	}
 }
 
 // --------------------------------------------
@@ -1013,6 +1100,7 @@ function numberNodes() {
 }
 
 function prepareAST() {
+	require('jsnorm')(sourceFileAst) // desugar
 	injectParentPointers(sourceFileAst)
 	injectEnvs(sourceFileAst)
 	numberSourceFileFunctions()	
@@ -1045,10 +1133,14 @@ function checkCallSignature(call, receiverKey, objKey, path) {
 
 			if (!fun)
 				return
-			if (fun.params.length !== call.parameters.length) {
-				console.log(path + ": function takes " + fun.params.length + " params but " + call.parameters.length + " were declared in call signature")
-			}
+			// if (fun.params.length !== call.parameters.length) {
+			// 	console.log(path + ": function takes " + fun.params.length + " params but " + call.parameters.length + " were declared in call signature")
+			// }
 			// console.log(path + ": function defined on line " + fun.loc.start.line)
+			var ok = analyzeFunction(fun, obj.function.env, {type:'value', value:{key:receiverKey}}, call.parameters)
+			if (!ok) {
+				console.log(path + ": call signature does not match")
+			}
 			break;
 	}
 }
@@ -1076,8 +1168,8 @@ function checkCallSignature(call, receiverKey, objKey, path) {
 */
 
 function AbstractState() {
-	this.variables = new Map
-	this.abstract = new Map
+	// this.variables = new Map
+	// this.abstract = new Map
 }
 AbstractState.prototype.var = function(name, value) {
 	var k = '$' + name
@@ -1086,31 +1178,36 @@ AbstractState.prototype.var = function(name, value) {
 	}
 	return this[k]
 }
-AbstractState.prototype.abstr = function(name, value) {
-	var k = '#' + name
-	if (arguments.length > 1) {
-		return this[k] = value
-	}
-	return this[k]
-}
+// AbstractState.prototype.abstr = function(name, value) {
+// 	var k = '#' + name
+// 	if (arguments.length > 1) {
+// 		return this[k] = value
+// 	}
+// 	return this[k]
+// }
 AbstractState.prototype.hash = function() {
 	if ('_hash' in this)
 		return this._hash
 	var bag = []
-	this.variables.forEach(function(name,t) {
-		bag.push(name + '=' + canonicalizeType(t))
-	})
-	this.abstract.forEach(function(name,t) {
-		bag.push(name + '=' + canonicalizeType(t))
-	})
+	for (var k in this) {
+		if (k[0] !== '$')
+			continue
+		bag.push(k + '=' + canonicalizeType(this[k]))
+	}
+	// this.variables.forEach(function(name,t) {
+		
+	// })
+	// this.abstract.forEach(function(name,t) {
+	// 	bag.push(name + '=' + canonicalizeType(t))
+	// })
 	bag.sort()
 	return this._hash = bag.join('|')
 }
-AbstractState.prototype.whenTrue = function(x) {
-	if (typeof x === 'string') {
+// AbstractState.prototype.whenTrue = function(x) {
+// 	if (typeof x === 'string') {
 		
-	}
-}
+// 	}
+// }
 
 var analysisMemo = Object.create(null);
 function getMemo(node) {
@@ -1139,16 +1236,18 @@ function fixp(node, state, fn) {
 	return result
 }
 
+function AbortAnalysis() {}
 function FunctionTooComplex() {}
+FunctionTooComplex.prototype = Object.create(AbortAnalysis.prototype)
 
 function analyzeFunction(node, env, receiver, args) { // [ Value ]
-	var variables = new Map
+	var state = new AbstractState
 	node.params.forEach(function(param,i) {
-		variables.put(param.name, args[i])
+		state.var(param.name, args[i])
 	})
 	node.$env.forEach(function(name) {
-		if (!variables.has(name)) {
-			variables.put(name, {
+		if (!state.var(name)) {
+			state.var(name, {
 				type: 'value',
 				value: {type: 'void'}
 			})
@@ -1157,8 +1256,8 @@ function analyzeFunction(node, env, receiver, args) { // [ Value ]
 	while (env) {
 		var envObj = lookupObject(env.key)
 		envObj.properties.forEach(function(prty) {
-			if (!variables.has(prty.name)) {
-				variables.put(prty.name, {
+			if (!state.var(prty.name)) {
+				state.var(prty.name, {
 					type: 'value',
 					value: prty.value // note: environment objects cannot have getters/setters
 				})
@@ -1166,20 +1265,20 @@ function analyzeFunction(node, env, receiver, args) { // [ Value ]
 		})
 		env = envObj.env
 	}
-	var state = {
-		this: receiver,
-		variables: variables,
-		abstract: new Map
-	}
+	state.var('@this', receiver)
+	var ok = false
 	try {
-		analyzeStmtBlock(node.body, state)
+		analyzeStmtBlock(node.body, state, function() {
+			throw new AbortAnalysis // termination found
+		})
 	} catch (e) {
-		if (e instanceof FunctionTooComplex) {
-			return;
+		if (e instanceof AbortAnalysis) {
+			ok = true
 		} else {
 			throw e;
 		}
 	}
+	return ok
 }
 function analyzeStmtBlock(nodes, state, k) { // [ { state : State, terminator?: Terminator } ]
 	var states = [state]
@@ -1327,13 +1426,11 @@ function analyzeStmt(node, state, k) { // [ { state : State, terminator?: Termin
 		 		return {state:state}
 		 	})
 		case 'ForInStatement':
-			throw new FunctionTooComplex
 		case 'WithStatement':
-			throw new FunctionTooComplex
 		case 'TryStatement':
 			throw new FunctionTooComplex
 		case 'FunctionDeclaration':
-			throw new Error("Inner functions not supported")
+			throw new FunctionTooComplex // TODO
 		default:
 			throw new Error("Unrecognized statement: " + (node.type || util.inspect(node)))
 	}
@@ -1356,7 +1453,7 @@ var EmptyObjectType = {
 function analyzeExp(node, state, k) { // [ { state : State, value : Value } ]
 	switch (node.type) {
 		case 'ThisExpression':
-			k({state:state, value:state.this()})
+			k({state:state, value:state.var('@this')})
 			break;
 		case 'ArrayExpression':
 			function visitArray(i, state, values) {
@@ -1374,75 +1471,38 @@ function analyzeExp(node, state, k) { // [ { state : State, value : Value } ]
 			visitArray(0, state, values)
 			break;
 		case 'ObjectExpression':
-			var statexs = [{
-				state: state,
-				properties: new Map
-			}]
-			node.properties.forEach(function(prty) {
-				if (prty.kind !== 'init')
-					throw new Error("Getters/setters are not supported")
-				var nextStatexs = []
-				var name = prty.key.type === 'Literal' ? prty.key.value : prty.key.name
-				statexs.forEach(function(stx) {
-					analyzeExp(prty.value, stx.state).forEach(function(er) {
-						var prtys = stx.properties.clone()
-						prtys.put(name, er.value)
-						nextStatexs.push({
-							state: er.state,
-							properties: prtys
+			function visitPrty(i, state) {
+				if (i === node.properties.length)
+					k({state:state, value:{type:'any'}}) // just use any for now
+				else {
+					var prty = node.properties[i]
+					if (prty.kind === 'init') {
+						analyzeExp(prty.value, state, function(er) {
+							visitPrty(i+1, er.state)
 						})
-					})
-				})
-				statexs = nextStatexs
-			})
-			// XXX: treat properties with literal names as stringIndexer and numberIndexer entries?
-			var result = []
-			statexs.forEach(function(stx) {
-				var t = { 
-					type:'object', 
-					properties: stx.properties.json(),
-					calls: [],
-					stringIndexer: null,
-					numberIndexer: null,
-					meta: {kind:'interface'}
+					} else {
+						visitPrty(i+1, state)
+					}
 				}
-				refineAbstract(stx.state, node.$id, t).forEach(function(state) {
-					result.push({
-						state: newState,
-						value: { type: 'abstract', value: node.$id }
-					})
-				})
-			})
-			return result
-		case 'FunctionExpression':
-			throw new Error("Inner function expressions not supported")
-		case 'SequenceExpression':
-			var statexs = [{
-				state: state,
-				value: null
-			}]
-			node.expressions.forEach(function(exp) {
-				var nextStatexs = []
-				statexs.forEach(function(stx) {
-					analyzeExp(exp, stx.state).forEach(function(er) {
-						nextStatexs.push({
-							state: er.state,
-							value: er.value
-						})
-					})
-				})
-				statexs = nextStatexs
-			})
-			return statexs
-			/*
-			x = {}@1
-			while (..) {
-				// [x -> @1, @1 -> {}], [x -> @2, @1 -> {}, @2 -> {f:@1}]
-				x = {f:x}@2
-				// [x -> @2, @1 -> {}, @2 -> {f:@1}], [x -> @1+2, @1+2 -> {f?:@1+2}]
 			}
-			[x -> @1+2, @1+2 -> {f? : @1+2}]
-			*/
+			visitPrty(0, state)
+			break;
+		case 'FunctionExpression':
+			throw new FunctionTooComplex
+		case 'SequenceExpression':
+			function visitSeq(i, state, v) {
+				if (i === node.expressions.length)
+					k({state: state, value: v})
+				else {
+					analyzeExp(node.expressions[i], state, function(er) {
+						visitSeq(i+1, er.state, er.value)
+					})
+				}
+			}
+			visitSeq(0, state, null)
+			break;
+		case 'UnaryExpression':
+			
 	}
 }
 function analyzeCondition(node, state) { // { whenTrue : ExpResult, whenFalse : ExpResult }
@@ -1450,32 +1510,7 @@ function analyzeCondition(node, state) { // { whenTrue : ExpResult, whenFalse : 
 }
 
 function bestCommonType(types) {
-	// TODO
-}
-function updateVariable(name, value, state) {
-	var vars = state.variables.clone()
-	vars.put(name,value)
-	return {
-		this: state.this,
-		variables: vars,
-		abstract: state.abstract
-	}
-}
-function defineAbstract(state, id, value) {
-	var abstr = state.abstract.clone()
-	abstr.put(id, value)
-	return {
-		this: state.this,
-		variables: state.variables,
-		abstract: abstr
-	}
-}
-function refineAbstract(state, id, value) {
-	// ?? {f:T, }
-
-}
-function unionTypes(state, t1, t2) {
-
+	return {type:'any'} // todo
 }
 
 // --------------------------
