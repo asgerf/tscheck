@@ -1240,10 +1240,18 @@ function AbortAnalysis() {}
 function FunctionTooComplex() {}
 FunctionTooComplex.prototype = Object.create(AbortAnalysis.prototype)
 
+function convertParamType(t) {
+	if (t.type === 'string-const') {
+		return {type: 'value', value: t.value}
+	} else {
+		return t;
+	}
+}
+
 function analyzeFunction(node, env, receiver, args) { // [ Value ]
 	var state = new AbstractState
 	node.params.forEach(function(param,i) {
-		state.var(param.name, args[i])
+		state.var(param.name, convertParamType(args[i]))
 	})
 	node.$env.forEach(function(name) {
 		if (!state.var(name)) {
@@ -1501,8 +1509,87 @@ function analyzeExp(node, state, k) { // [ { state : State, value : Value } ]
 			}
 			visitSeq(0, state, null)
 			break;
-		case 'UnaryExpression':
-			
+		case 'UnaryExpression': // node.operator, node.prefix, node.argument
+			switch (node.operator) {
+				case '+':
+				case '-':
+				case '!':
+				case '~':
+				case 'typeof':
+				case 'void':
+				case 'delete':
+			}
+			break;
+		case 'BinaryExpression': // node.operator, node.left, node.right
+			analyzeExp(node.left, state, function(lr) {
+				analyzeExp(node.right, lr.state, function (rr) {
+					var r;
+					switch (node.operator) {
+						case '==': 
+						case '!=':
+						case '===':
+						case '!==':
+							var strict = (node.operator.length === 3);
+							var negated = (node.operator[0] === '!');
+							r = abstractEqual(lr.value, rr.value, strict)
+							if (r && negated)
+								r = abstractNegate(r)
+							break;
+
+						case '<': // (number X number -> boolean) + (string X string -> boolean)
+						case '<=':
+						case '>':
+						case '>=':
+							r = abstractCompare(lr.value, rr.value, node.operator)
+							break;
+
+						case '+': // (number X number -> number) + (any X string -> string) + (string X any -> string)
+							r = abstractPlus(lr.value, rr.value)
+							break;
+
+						case '<<': // number X number -> number
+						case '>>':
+						case '>>>':
+						case '-':
+						case '*':
+						case '/':
+						case '%':
+						case '^':
+						case '|':
+						case '&':
+							r = abstractArithmetic(lr.value, rr.value, node.operator)
+							break;
+
+						case 'in': // (string X any -> boolean) [special]
+							r = abstractIn(lr.value, rr.value)
+							break;
+
+						case 'instanceof': // (object X object -> boolean) [special]
+							r = abstractInstanceof(lr.value, rr.value)
+							break;
+
+						default: throw new Error("Unrecognized binary operator: " + node.operator)
+					} // switch
+					if (r) {
+						k({state: rr.state, value: r})
+					}
+				}) // analyzeExp right
+			}) // analyzeExp left
+			break;
+		case 'AssignmentExpression': // node.operator, node.left, node.right
+			break;
+		case 'UpdateExpression': // node.operator, node.argument, node.prefix
+			break;
+		case 'LogicalExpression': // node.operator, node.left, node.right
+			break;
+		case 'ConditionalExpression': // test, alternate, consequent
+			break;
+		case 'NewExpression': // callee, arguments
+			break;
+		case 'CallExpression': // callee, arguments
+			break;
+		case 'MemberExpression': // object, property, computed
+			break;
 	}
 }
 function analyzeCondition(node, state) { // { whenTrue : ExpResult, whenFalse : ExpResult }
@@ -1512,6 +1599,130 @@ function analyzeCondition(node, state) { // { whenTrue : ExpResult, whenFalse : 
 function bestCommonType(types) {
 	return {type:'any'} // todo
 }
+
+function abstractType(x) {
+	return x.type === 'value' ? (typeof x.value) : x.type;
+}
+function abstractEqual(x, y, strict) {
+
+}
+function abstractNegate(x) {
+	switch (x.type) {
+		case 'value':
+			return {type: 'value', value: !x.value}
+		case 'boolean':
+			return x;
+		case 'void':
+			return {type: 'value', value: true}
+		default:
+			return {type: 'boolean'}
+	}
+}
+function abstractCompare(x, y, operator) {
+	switch (x.type + '-' + y.type) {
+		case 'value-value':
+			if (x.value && typeof x.value === 'object' || y.value && typeof y.value === 'object') {
+				return {type: 'boolean'}
+			}
+			var r;
+			switch (operator) {
+				case '<=': r = x.value <= y.value; break;
+				case '<': r = x.value < y.value; break;
+				case '>': r = x.value > y.value; break;
+				case '>=': r = x.value >= y.value; break;
+			}
+			return {type: 'value', value: r}
+
+		case 'number-number':
+		case 'string-string':
+			return {type: 'boolean'}
+
+		default:
+			return {type: 'value', value: false}
+	}
+}
+function abstractPlus(x, y) {
+	if (x.type === 'value' && y.type === 'value')  {
+		if (x.value === 0 && typeof y.value === 'number')
+			return y
+		if (y.value === 0 && typeof x.value === 'number')
+			return x
+		if (x.value === '' && typeof y.value === 'string')
+			return y
+		if (y.value === '' && typeof x.value === 'string')
+			return x;
+	}
+	switch (abstractType(x) + '-' + abstractType(y)) {
+		case 'number-number':
+			return {type: 'number'}
+		case 'string-string':
+			return {type: 'string'}
+		default:
+			return {type: 'string'}
+	}
+}
+function abstractArithmetic(x, y, operator) {
+	if (x.type === 'value' && typeof x.value === 'number' && y.type === 'value' && typeof y.value === 'number') {
+		var r;
+		switch (operator) {
+			case '<<': r = x.value << y.value; break;
+			case '>>': r = x.value >> y.value; break;
+			case '>>>': r = x.value >>> y.value; break;
+			case '-': r = x.value - y.value; break;
+			case '*': r = x.value * y.value; break;
+			case '/': r = x.value / y.value; break;
+			case '%': r = x.value % y.value; break;
+			case '^': r = x.value ^ y.value; break;
+			case '|': r = x.value | y.value; break;
+			case '&': r = x.value & y.value; break;
+		}
+		if (r === 0 || r === 1 || r === -1 || r === x.value || r === y.value)
+			return {type: 'value', value: r}
+		else
+			return {type: 'number'}
+	}
+	return {type: 'number'}
+}
+function abstractIn(x, y) {
+	if (y.type === 'value') {
+		if (y.value === null)
+			return null // throws exception
+		if (typeof y.value !== 'object')
+			return null
+		x = abstractToString(x)
+		if (x.type === 'value') {
+			var obj = lookupObject(y.key)
+			
+		} else {
+			return {type: 'boolean'}
+		}
+	} else if (y.type === 'object') {
+
+	} else {
+		return null;
+	}
+}
+function abstractToString(x) {
+	if (x.type !== 'value')
+		return {type: 'string'}
+	switch (typeof x.value) {
+		case 'number':
+			return {type: 'value', value: String(x.value)}
+		case 'string':
+			return x
+		case 'boolean':
+			return {type: 'value', value: (x.value ? 'true' : 'false')}
+		case 'undefined':
+			return {type: 'value', value:'undefined'}
+		case 'object':
+			return (x === null) ? {type: 'value', value:'null'} : {type: 'string'}
+		case 'function':
+			return {type: 'string'}
+		default:
+			return {type: 'string'}
+	}
+}
+
 
 // --------------------------
 // 		Entry Point
