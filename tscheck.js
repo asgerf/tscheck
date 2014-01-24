@@ -479,8 +479,13 @@ function coerceTypeToObject(x) {
 // 		 Recursive check of Value vs Type
 // ------------------------------------------------------------
 
+// True if `x` is the canonical representation of an integer (no leading zeros etc)
 function isNumberString(x) {
 	return x === String(Math.floor(Number(x)))
+}
+// True if `x` can be converted to a number
+function isNumberLikeString(x) {
+	return x == 0 || !!Number(x)
 }
 
 
@@ -1601,10 +1606,117 @@ function bestCommonType(types) {
 }
 
 function abstractType(x) {
-	return x.type === 'value' ? (typeof x.value) : x.type;
+	switch (x.type) {
+		case 'value': 
+			if (x.value === null)
+				return 'null'
+			else if (typeof x.value === 'function')
+				return 'object'
+			else
+				return typeof x.value
+		case 'reference': return 'object'
+		case 'enum': return 'any'
+		default: return x.type
+	}
 }
 function abstractEqual(x, y, strict) {
+	if (x.type === 'value' && y.type === 'value') {
+		if (x.value && typeof x.value === 'object' && y.value && typeof y.value === 'object') {
+			return {type: 'value', value: x.value.key === y.value.key}
+		}
+		return {type: 'value', value: strict ? x.value === y.value : x.value == y.value}
+	}
+	if (y.type === 'value' || y.type === 'enum') {
+		var z = x; x = y; y = z; // swap x/y, so x is the value and y is the abstract type
+	}
+	// FIXME: handle enum types
+	var xt = abstractType(x)
+	var yt = abstractType(y)
+	if (xt === 'any' || yt === 'any')
+		return {type: 'boolean'}
+	if (xt !== yt && strict)
+		return {type: 'value', value: false} // values of different types cannot be strictly equal
+	// abstract types: string, number, boolean, void, object, null   (null only for value types)
+	if (x.type === 'value') {
+		// if (x.value === null) {
+		// 	// null satisfies all types, so we handle this case here
+		// 	return yt === 'void' ? {type: 'value', value: true} : {type: 'boolean'}
+		// }
+		// value-type comparison
+		switch (xt + '-' + yt) {
+			// String value vs type
+			case 'string-number': 
+			case 'string-boolean': 
+				if (isNumberLikeString(x.value))
+					return {type: 'boolean'}
+				else
+					return {type: 'value', value: false}
+			case 'string-object':
+			case 'string-void':
+			case 'string-string':
+				return {type: 'boolean'}
 
+			// Number value vs type
+			case 'number-string':
+				return {type: 'boolean'}
+			case 'number-boolean':
+				if (x.value === 0 || x.value === 1)
+					return {type: 'boolean'}
+				else
+					return {type: 'value', value: false}
+			case 'number-void':
+				return {type: 'value', value: false}
+			case 'number-object':
+				if (y.brand === 'Number' || y.brand === 'Boolean' || y.brand === 'Array')
+					return {type: 'boolean'} // 0 == [], 1 == [1], 1 == new Number(1)
+				else
+					return {type: 'value', value: false}
+			case 'number-number':
+				return isNaN(x.value) ? {type: 'value', value:false} : {type: 'boolean'}
+
+			// Boolean value vs type
+			case 'boolean-string':
+			case 'boolean-number':
+				return {type: 'boolean'}
+			case 'boolean-void':
+				return {type: 'value', value: false}
+			case 'boolean-object':
+				if (y.brand === 'Number' || y.brand === 'Boolean' || y.brand === 'Array')
+					return {type: 'boolean'} // false == [], true == [1], true == new Boolean(1)
+				else
+					return {type: 'value', value: false}
+			case 'boolean-boolean':
+				return {type: 'boolean'}
+
+
+			// Object value vs type
+			case 'object-number:'
+			case 'object-boolean:'
+				if (hasBrand(x.value, 'Number') || hasBrand(x.value, 'Boolean') || hasBrand(x.value, 'Array'))
+					return {type: 'boolean'}
+				else
+					return {type: 'value', value: false}
+			case 'object-void':
+				return {type: 'value', value: false}
+			case 'object-object':
+				// TODO: check if object satisfies type! If not, return false
+				return {type: 'boolean'}
+
+			case 'null-string':
+			case 'null-number':
+			case 'null-boolean':
+			case 'null-object':
+				return {type: 'boolean'} // y could be null since null satisfies all types
+
+			case 'null-void':
+				return {type: 'value', value: true} // null == null and null == undefined
+		}
+	} else {
+		// type-type comparison
+		switch (xt + '-' + yt) {
+			
+		}
+	}
 }
 function abstractNegate(x) {
 	switch (x.type) {
@@ -1643,14 +1755,9 @@ function abstractCompare(x, y, operator) {
 }
 function abstractPlus(x, y) {
 	if (x.type === 'value' && y.type === 'value')  {
-		if (x.value === 0 && typeof y.value === 'number')
-			return y
-		if (y.value === 0 && typeof x.value === 'number')
-			return x
-		if (x.value === '' && typeof y.value === 'string')
-			return y
-		if (y.value === '' && typeof x.value === 'string')
-			return x;
+		var r = x.value + y.value
+		if (r === 0 || r === 1 || r === -1 || r === '' || r === x.value || r === String(x.value) || r === y.value || r === String(y.value))
+			return {type: 'value', value: r}
 	}
 	switch (abstractType(x) + '-' + abstractType(y)) {
 		case 'number-number':
@@ -1692,12 +1799,21 @@ function abstractIn(x, y) {
 		x = abstractToString(x)
 		if (x.type === 'value') {
 			var obj = lookupObject(y.key)
-			
+			return {type: 'value', value: obj.propertyMap.has(x.value)}
 		} else {
 			return {type: 'boolean'}
 		}
 	} else if (y.type === 'object') {
-
+		x = abstractToString(x)
+		if (x.type === 'value') {
+			if (x.value in y.properties)
+				return {type: 'value', value: true}
+			if (x.stringIndexer || x.numberIndexer)
+				return {type: 'boolean'}
+			return {type: 'value', value: false}
+		} else {
+			return {type: 'boolean'}
+		}
 	} else {
 		return null;
 	}
