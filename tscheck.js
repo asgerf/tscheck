@@ -1515,15 +1515,54 @@ function analyzeExp(node, state, k) { // [ { state : State, value : Value } ]
 			visitSeq(0, state, null)
 			break;
 		case 'UnaryExpression': // node.operator, node.prefix, node.argument
-			switch (node.operator) {
-				case '+':
-				case '-':
-				case '!':
-				case '~':
-				case 'typeof':
-				case 'void':
-				case 'delete':
-			}
+			analyzeExp(node.argument, function(lr) {
+				var r;
+				if (lr.type === 'value') {
+					switch (node.operator) {
+						case '+':
+							if (lr.value && typeof lr.value === 'object')
+								r = {type: 'number'}
+							else
+								r = {type: 'value', value: +lr.value};
+							break;
+						case '-':
+							if (lr.value && typeof lr.value === 'object')
+								r = {type: 'number'}
+							else
+								r = {type: 'value', value: -lr.value};
+							break;
+						case '!':
+							if (lr.value && typeof lr.value === 'object')
+								r = {type: 'value', value: false}
+							else
+								r = {type: 'value', value: !lr.value};
+							break;
+						case '~':
+							if (lr.value && typeof lr.value === 'object')
+								r = {type: 'number'}
+							else
+								r = {type: 'value', value: ~lr.value};
+							break;
+						case 'typeof':
+							if (lr.value && typeof lr.value === 'object') {
+								var obj = lookupObject(lr.value.key)
+								r = {type: 'value', value: obj.function ? 'function' : 'object'}
+							} else {
+								r = {type: 'value', value: typeof lr.value}
+							}
+							break;
+						case 'void':
+							r = {type: 'value', value: undefined}
+							break;
+						case 'delete':
+							r = {type: 'boolean'}
+							break;
+					}
+					if (r) {
+						k({state: lr.state, value: r})
+					}
+				}
+			})
 			break;
 		case 'BinaryExpression': // node.operator, node.left, node.right
 			analyzeExp(node.left, state, function(lr) {
@@ -1638,10 +1677,6 @@ function abstractEqual(x, y, strict) {
 		return {type: 'value', value: false} // values of different types cannot be strictly equal
 	// abstract types: string, number, boolean, void, object, null   (null only for value types)
 	if (x.type === 'value') {
-		// if (x.value === null) {
-		// 	// null satisfies all types, so we handle this case here
-		// 	return yt === 'void' ? {type: 'value', value: true} : {type: 'boolean'}
-		// }
 		// value-type comparison
 		switch (xt + '-' + yt) {
 			// String value vs type
@@ -1698,8 +1733,9 @@ function abstractEqual(x, y, strict) {
 					return {type: 'value', value: false}
 			case 'object-void':
 				return {type: 'value', value: false}
-			case 'object-object':
-				// TODO: check if object satisfies type! If not, return false
+			case 'object-string':
+				return {type: 'boolean'}
+			case 'object-object': // TODO: check against type for compatibility?
 				return {type: 'boolean'}
 
 			case 'null-string':
@@ -1714,9 +1750,44 @@ function abstractEqual(x, y, strict) {
 	} else {
 		// type-type comparison
 		switch (xt + '-' + yt) {
-			
+			case 'string-number': 
+			case 'string-boolean': 
+			case 'string-object':
+			case 'string-void':
+				return {type: 'boolean'}
+			case 'string-string':
+
+			case 'number-string':
+			case 'number-boolean':
+			case 'number-void':
+			case 'number-object':
+			case 'number-number':
+				return {type: 'boolean'}
+
+			case 'boolean-string':
+			case 'boolean-number':
+			case 'boolean-void':
+			case 'boolean-object':
+			case 'boolean-boolean':
+				return {type: 'boolean'}
+
+			case 'object-number:'
+			case 'object-string:'
+			case 'object-boolean:'
+			case 'object-void':
+			case 'object-object': // TODO: check types for compatibility?
+				return {type: 'boolean'}
+
+			case 'void-number':
+			case 'void-boolean':
+			case 'void-string':
+			case 'void-object':
+				return {type: 'boolean'}
+			case 'void-void':
+				return {type: 'value', value: true}
 		}
 	}
+	throw new Error("Unhandled case in abstractEqual")
 }
 function abstractNegate(x) {
 	switch (x.type) {
@@ -1786,9 +1857,37 @@ function abstractArithmetic(x, y, operator) {
 		if (r === 0 || r === 1 || r === -1 || r === x.value || r === y.value)
 			return {type: 'value', value: r}
 		else
-			return {type: 'number'}
+			return {type: 'number'} // widen to ensure termination
 	}
 	return {type: 'number'}
+}
+function abstractInstanceof(x,y) {
+	if (x.type === 'value' && y.type === 'value') {
+		var prty = lookupObject(y.value.key).propertyMap.get("prototype")
+		if (!prty) {
+			return null // TypeError at runtime
+		}
+		if (!('value' in prty))
+			return {type: 'boolean'} // prototype hidden behind getter
+		var proto = prty.value
+		var v = x.value
+		while (v && typeof v === 'object') {
+			if (valuesStrictEq(v,proto))
+				return {type: 'value', value: true}
+			v = lookupObject(v.key).prototype
+		}
+		return {type: 'value', value: false}
+	}
+	if (y.type === 'value') {
+		// TODO: check against type of left operand
+		return {type: 'boolean'}
+	}
+	if (x.type === 'value') {
+		// TODO: check against type of right operand
+		return {type: 'boolean'}
+	}
+	// TODO: check compatibility of types
+	return {type: 'boolean'}
 }
 function abstractIn(x, y) {
 	if (y.type === 'value') {
