@@ -164,6 +164,14 @@ function classifyId(node) {
         return null;
 }
 
+function getIdentifierScope(node) {
+	if (node.$parent.type === 'FunctionDeclaration' && node.$parent.id === node) {
+		return getEnclosingFunction(node.$parent.$parent)
+	} else {
+		return getEnclosingFunction(node)
+	}
+}
+
 function markClosureVariables(ast) {
 	ast.$locals = new Map // top-level scope has no local variables
 	function visit(node) {
@@ -176,12 +184,12 @@ function markClosureVariables(ast) {
 				break;
 			case 'Identifier':
 				if (classifyId(node).type === 'variable') {
-					var fun = getEnclosingFunction(node)
-					if (fun.type === 'Program' || !fun.$env.has(node.name)) {
+					var fun = getIdentifierScope(node)
+					if (fun.type !== 'Program' && !fun.$env.has(node.name)) {
 						// find function whose variable is being referenced
 						do {
 							fun = getEnclosingFunction(fun.$parent)
-						} while (fun && !fun.$env.has(node.name));
+						} while (fun.type !== 'Program' && !fun.$env.has(node.name));
 						// remove local
 						if (fun) {
 							fun.$locals.remove(node.name)
@@ -199,7 +207,8 @@ function prepareAST(ast) {
 	jsnorm(ast)
 	injectParentPointers(ast)
 	injectEnvs(ast)
-	numberSourceFileFunctions(ast)	
+	numberSourceFileFunctions(ast)
+	markClosureVariables(ast)
 }
 
 
@@ -259,23 +268,61 @@ function convertFunction(f) {
 	var block_idx = -1;
 	var label2block = {} // string -> number
 	var next_var = 2;
+	var locals = new Map
 
+	// decl_block contains parameter initialization and function declarations (added during AST walk)
 	var decl_block = newBlock()
 	var body_block = newBlock()
-	blocks[decl_block].jump = {type: 'goto', target: body_block}
-	setBlock(body_block)
+	
+	function run() {
+		setBlock(decl_block)
+		// initialize self-reference
+		if (f.type === 'FunctionExpression' && f.id) {
+			if (f.$locals.has(f.id.name)) {
+				locals.put(f.id.name, THIS_FN)
+			} else {
+				addStmt({
+					type: 'write-var',
+					var: f.id.name,
+					src: THIS_FN
+				})
+			}
+		}
+		// initialize parameters
+		var params = f.params || []
+		for (var i=0; i<params.length; i++) {
+			var v = newVar()
+			if (f.$locals.has(params[i].name)) {
+				locals.put(params[i].name, v)
+			} else {
+				addStmt({
+					type: 'write-var',
+					var: f.params[i].name,
+					src: v
+				})
+			}
+		}
+		f.$locals.forEach(function(name) {
+			if (!locals.has(name)) {
+				locals.put(name, newVar())
+			}
+		})
+		block.jump = {type: 'goto', target: body_block}
 
-	if (f.type === 'Program') {
-		f.body.forEach(visitStmt)
-	} else {
-		visitStmt(f.body)
-	}
+		setBlock(body_block)
 
-	block.jump = { type: 'return', value: null, implicit: true }
+		if (f.type === 'Program') {
+			f.body.forEach(visitStmt)
+		} else {
+			visitStmt(f.body)
+		}
 
-	return {
-		parameters: f.params ? f.params.map(function(p) { return p.name }) : [],
-		blocks: blocks
+		block.jump = { type: 'return', value: null, implicit: true }
+
+		return {
+			num_parameters: params.length,
+			blocks: blocks
+		}
 	}
 
 	function newBlock() {
@@ -304,7 +351,7 @@ function convertFunction(f) {
 				node.body.forEach(visitStmt);
 				break;
 			case 'ExpressionStatement':
-				visitExpr(node.expression);
+				visitExpr(node.expression, ANYWHERE);
 				break;
 			case 'IfStatement':
 				var cnd = visitCondition(node.test, DISCARD_VALUE)
@@ -338,11 +385,11 @@ function convertFunction(f) {
 			case 'SwitchStatement':
 				throw new Error("Program not normalized");
 			case 'ReturnStatement':
-				block.jump = { type: 'return', value: node.argument ? visitExpr(node.argument) : null, implicit: false }
+				block.jump = { type: 'return', value: node.argument ? visitExpr(node.argument, ANYWHERE) : null, implicit: false }
 				setBlock(newBlock())
 				break;
 			case 'ThrowStatement':
-				block.jump = { type: 'throw', value: visitExpr(node.argument) }
+				block.jump = { type: 'throw', value: visitExpr(node.argument, ANYWHERE) }
 				setBlock(newBlock())
 				break;
 			case 'TryStatement':
@@ -353,7 +400,7 @@ function convertFunction(f) {
 				setBlock(entry)
 				var jump = block.jump = {
 					type: 'if',
-					condition: visitExpr(node.test),
+					condition: visitExpr(node.test, ANYWHERE),
 					then: newBlock(),
 					else: newBlock()
 				};
@@ -369,7 +416,7 @@ function convertFunction(f) {
 				visitStmt(node.body)
 				var jump = block.jump = {
 					type: 'if',
-					condition: visitExpr(node.test),
+					condition: visitExpr(node.test, ANYWHERE),
 					then: entry,
 					else: newBlock()
 				};
@@ -398,12 +445,8 @@ function convertFunction(f) {
 			case 'VariableDeclaration':
 				node.declarations.forEach(function(d) {
 					if (d.init) {
-						var v = visitExpr(d.init)
-						addStmt({
-							type: 'write-var',
-							var: d.id.name,
-							src: v
-						})
+						var lv = visitLvalue(d.id)
+						visitExpr(d.init, lv)
 					}
 				})
 				break;
@@ -411,71 +454,103 @@ function convertFunction(f) {
 				throw new Error("Unexpected statement type: " + node.type)
 		}
 	}
-	function visitExpr(node) { // returns variable number
+	var ANYWHERE = {
+		write: function(f) {
+			if (typeof f === 'function') {
+				var r = newVar()
+				f(r)
+				return r
+			} else {
+				return f
+			}
+		}
+	}
+	function varDst(v) {
+		return {
+			write: function(f) {
+				if (typeof f === 'function') {
+					f(v)
+				} else {
+					addStmt({
+						type: 'assign',
+						src: f,
+						dst: v
+					})
+				}
+				return v
+			}
+		}
+	}
+	function visitExprAnywhere(node) {
+		return visitExpr(node, ANYWHERE)
+	}
+	function visitExpr(node, dst) { // returns variable number
 		if (node === null)
 			return null
 		switch (node.type) {
 			case 'ThisExpression':
-				return THIS
+				return dst.write(THIS)
 			case 'ArrayExpression':
-				var r = newVar()
-				addStmt({
-					type: 'create-array',
-					elements: node.elements.map(visitExpr),
-					dst: r
+				return dst.write(function(r) {
+					addStmt({
+						type: 'create-array',
+						elements: node.elements.map(visitExprAnywhere),
+						dst: r
+					})
 				})
-				return r
 			case 'ObjectExpression':
-				var r = newVar()
-				addStmt({
-					type: 'create-object',
-					properties: node.properties.map(function(prty) {
-						return {
-							key: prty.key.type === 'Literal' ? String(prty.key.value) : prty.key.name,
-							kind: prty.kind,
-							value: visitExpr(prty.value)
-						}
-					}),
-					dst: r
+				return dst.write(function(r) {
+					addStmt({
+						type: 'create-object',
+						properties: node.properties.map(function(prty) {
+							return {
+								key: prty.key.type === 'Literal' ? String(prty.key.value) : prty.key.name,
+								kind: prty.kind,
+								value: visitExpr(prty.value, ANYWHERE)
+							}
+						}),
+						dst: r
+					})
 				})
-				return r
 			case 'FunctionExpression':
-				var r = newVar()
-				addStmt({
-					type: 'create-function',
-					function: node.$function_id,
-					dst: r
+				return dst.write(function(r) {
+					addStmt({
+						type: 'create-function',
+						function: node.$function_id,
+						dst: r
+					})
 				})
-				return r
 			case 'SequenceExpression':
-				var rs = node.expressions.map(visitExpr)
-				return rs[rs.length-1]
+				for (var i=0; i<node.expressions.length-1; i++) {
+					visitExpr(node.expressions[i], ANYWHERE)
+				}
+				return visitExpr(node.expressions[node.expressions.length-1], dst)
 			case 'UnaryExpression':
-				var r = newVar()
-				addStmt({
-					type: 'unary',
-					operator: node.operator,
-					argument: visitExpr(node.argument),
-					dst: r
+				return dst.write(function(r) {
+					addStmt({
+						type: 'unary',
+						operator: node.operator,
+						argument: visitExpr(node.argument, ANYWHERE),
+						dst: r
+					})	
 				})
-				return r
 			case 'BinaryExpression':
-				var r = newVar()
-				addStmt({
-					type: 'binary',
-					operator: node.operator,
-					left: visitExpr(node.left),
-					right: visitExpr(node.right),
-					dst: r
+				return dst.write(function(r) {
+					addStmt({
+						type: 'binary',
+						operator: node.operator,
+						left: visitExpr(node.left, ANYWHERE),
+						right: visitExpr(node.right, ANYWHERE),
+						dst: r
+					})
 				})
-				return r
 			case 'AssignmentExpression':
 				var lv = visitLvalue(node.left)
-				var rv = visitExpr(node.right)
 				if (node.operator === '=') {
-					return lv.write(rv)
+					var r = visitExpr(node.right, lv)
+					return dst.write(r)
 				} else {
-					return lv.readWrite(function(r) {
+					var r = lv.readWrite(function(r) {
 						addStmt({
 							type: 'binary',
 							operator: node.operator.substring(0, node.operator.length-1),
@@ -484,12 +559,13 @@ function convertFunction(f) {
 							dst: r
 						})
 					})
+					return dst.write(r)
 				}
 				throw new Error("AssignmentExpression")
 			case 'UpdateExpression':
 				var lv = visitLvalue(node.argument)
-				if (node.prefix) {
-					return lv.readWrite(function(r) {
+				if (node.prefix || node.$parent.type === 'ExpressionStatement') {
+					var r = lv.readWrite(function(r) {
 						addStmt({
 							type: 'unary',
 							operator: node.operator,
@@ -497,6 +573,7 @@ function convertFunction(f) {
 							dst: r
 						})
 					})
+					return dst.write(r)
 				} else {
 					var r = lv.readCopy()
 					lv.write(function(t) {
@@ -507,127 +584,116 @@ function convertFunction(f) {
 							dst: t
 						})
 					})
-					return r
+					return dst.write(r)
 				}
 			case 'LogicalExpression':
-				var r = newVar()
-				var cnd = visitCondition(node.left, KEEP_VALUE)
-				switch (node.operator) {
-					case '&&':
-						setBlock(cnd.whenTrue.block)
-						addStmt({
-							type: 'assign',
-							src: visitExpr(node.right),
-							dst: r
-						})
-						setBlock(cnd.whenFalse.block)
-						addStmt({
-							type: 'assign',
-							src: cnd.whenFalse.result,
-							dst: r
-						})
-						break;
-					case '||':
-						setBlock(cnd.whenFalse.block)
-						addStmt({
-							type: 'assign',
-							src: visitExpr(node.right),
-							dst: r
-						})
-						setBlock(cnd.whenTrue.block)
-						addStmt({
-							type: 'assign',
-							src: cnd.whenTrue.result,
-							dst: r
-						})
-						break;
-				}
-				var b = newBlock()
-				setBlock(b)
-				blocks[cnd.whenTrue.block].jump = {type: 'goto', target: b}
-				blocks[cnd.whenFalse.block].jump = {type: 'goto', target: b}
-				return r
+				return dst.write(function(r) {
+					var cnd = visitCondition(node.left, KEEP_VALUE)
+					switch (node.operator) {
+						case '&&':
+							setBlock(cnd.whenTrue.block)
+							visitExpr(node.right, varDst(r))
+							setBlock(cnd.whenFalse.block)
+							addStmt({
+								type: 'assign',
+								src: cnd.whenFalse.result,
+								dst: r
+							})
+							break;
+						case '||':
+							setBlock(cnd.whenFalse.block)
+							visitExpr(node.right, varDst(r))
+							setBlock(cnd.whenTrue.block)
+							addStmt({
+								type: 'assign',
+								src: cnd.whenTrue.result,
+								dst: r
+							})
+							break;
+					}
+					var b = newBlock()
+					setBlock(b)
+					blocks[cnd.whenTrue.block].jump = {type: 'goto', target: b}
+					blocks[cnd.whenFalse.block].jump = {type: 'goto', target: b}
+				})
 			case 'ConditionalExpression':
 				var cnd = visitCondition(node.test, DISCARD_VALUE)
-				var r = newVar()
-				setBlock(cnd.whenTrue.block)
-				addStmt({
-					type: 'assign',
-					src: visitExpr(node.consequent),
-					dst: r
+				return dst.write(function(r) {
+					setBlock(cnd.whenTrue.block)
+					visitExpr(node.consequent, varDst(r))
+					setBlock(cnd.whenFalse.block)
+					visitExpr(node.alternate, varDst(r))
+					var b = newBlock()
+					setBlock(b)
+					blocks[cnd.whenTrue.block].jump = {type: 'goto', target: b}
+					blocks[cnd.whenFalse.block].jump = {type: 'goto', target: b}
 				})
-				setBlock(cnd.whenFalse.block)
-				addStmt({
-					type: 'assign',
-					src: visitExpr(node.alternate),
-					dst: r
-				})
-				var b = newBlock()
-				setBlock(b)
-				blocks[cnd.whenTrue.block].jump = {type: 'goto', target: b}
-				blocks[cnd.whenFalse.block].jump = {type: 'goto', target: b}
-				return r
 			case 'NewExpression':
 				var c = visitExpr(node.callee)
-				var args = node.arguments.map(visitExpr)
-				var r = newVar()
-				addStmt({
-					type: 'call-constructor',
-					function: c,
-					arguments: args,
-					dst: r
-				})
-				return r
-			case 'CallExpression':
-				var r = newVar()
-				if (node.callee.type === 'MemberExpression') {
-					var object = visitExpr(node.callee.object)
-					var prty = node.callee.computed ? visitExpr(node.callee.property) : node.callee.property.name
-					var args = node.arguments.map(visitExpr)
+				var args = node.arguments.map(visitExprAnywhere)
+				return dst.write(function(r) {
 					addStmt({
-						type: 'call-method',
-						object: object,
-						prty: prty,
-						arguments: args,
-						dst: r
-					})
-					return r
-				} else {
-					var c = visitExpr(node.callee)
-					var args = node.arguments.map(visitExpr)
-					addStmt({
-						type: 'call-function',
+						type: 'call-constructor',
 						function: c,
 						arguments: args,
 						dst: r
 					})
-					return r
+				})
+			case 'CallExpression':
+				if (node.callee.type === 'MemberExpression') {
+					return dst.write(function(r) {
+						var object = visitExpr(node.callee.object, ANYWHERE)
+						var prty = node.callee.computed ? visitExpr(node.callee.property, ANYWHERE) : node.callee.property.name
+						var args = node.arguments.map(visitExprAnywhere)
+						addStmt({
+							type: 'call-method',
+							object: object,
+							prty: prty,
+							arguments: args,
+							dst: r
+						})
+					})
+				} else {
+					var c = visitExpr(node.callee, ANYWHERE)
+					var args = node.arguments.map(visitExprAnywhere)
+					return dst.write(function(r) {
+						addStmt({
+							type: 'call-function',
+							function: c,
+							arguments: args,
+							dst: r
+						})
+					})
 				}
 			case 'MemberExpression':
-				var r = newVar()
-				addStmt({
-					type: 'load',
-					object: visitExpr(node.object),
-					prty: node.computed ? visitExpr(node.property) : node.property.name,
-					dst: r
+				return dst.write(function(r) {
+					addStmt({
+						type: 'load',
+						object: visitExpr(node.object, ANYWHERE),
+						prty: node.computed ? visitExpr(node.property, ANYWHERE) : node.property.name,
+						dst: r
+					})
 				})
-				return r
 			case 'Identifier':
-				var r = newVar()
-				addStmt({
-					type: 'read-var',
-					var: node.name,
-					dst: r
-				})
-				return r
+				if (locals.has(node.name)) {
+					return dst.write(locals.get(node.name))
+				} else {
+					return dst.write(function(r) {
+						addStmt({
+							type: 'read-var',
+							var: node.name,
+							dst: r
+						})
+					})
+				}
 			case 'Literal':
-				var r = newVar()
-				addStmt({
-					type: 'const',
-					value: node.value,
-					dst: r
+				return dst.write(function(r) {
+					addStmt({
+						type: 'const',
+						value: node.value,
+						dst: r
+					})	
 				})
-				return r
 			default:
 				throw new Error("Unrecognized expression type: " + node.type)
 		}
@@ -637,25 +703,49 @@ function convertFunction(f) {
 	function visitLvalue(node) {
 		switch (node.type) {
 			case 'Identifier':
-				return {
-					readCopy: function() {
-						return this.read.apply(arguments)
-					},
-					read: function(f) {
-						var r = newVar()
-						addStmt({
-							type: 'read-var',
-							var: node.name,
-							dst: r
-						})
-						if (f) { 
-							f(r) 
-						}
-						return r
-					},
-					write: function(f) {
-						if (typeof f === 'function') {
+				if (!locals.has(node.name)) {
+					return {
+						readCopy: function() {
+							return this.read.apply(arguments)
+						},
+						read: function(f) {
 							var r = newVar()
+							addStmt({
+								type: 'read-var',
+								var: node.name,
+								dst: r
+							})
+							if (f) { 
+								f(r) 
+							}
+							return r
+						},
+						write: function(f) {
+							if (typeof f === 'function') {
+								var r = newVar()
+								f(r)
+								addStmt({
+									type: 'write-var',
+									var: node.name,
+									src: r
+								})
+								return r
+							} else {
+								addStmt({
+									type: 'write-var',
+									var: node.name,
+									src: f
+								})
+								return f
+							}
+						},
+						readWrite: function(f) {
+							var r = newVar()
+							addStmt({
+								type: 'read-var',
+								var: node.name,
+								dst: r
+							})
 							f(r)
 							addStmt({
 								type: 'write-var',
@@ -663,34 +753,53 @@ function convertFunction(f) {
 								src: r
 							})
 							return r
-						} else {
-							addStmt({
-								type: 'write-var',
-								var: node.name,
-								src: f
-							})
-							return f
 						}
-					},
-					readWrite: function(f) {
-						var r = newVar()
-						addStmt({
-							type: 'read-var',
-							var: node.name,
-							dst: r
-						})
-						f(r)
-						addStmt({
-							type: 'write-var',
-							var: node.name,
-							src: r
-						})
-						return r
+					}
+				} else {
+					return {
+						readCopy: function(f) {
+							var r = locals.get(node.name)
+							var t = newVar()
+							addStmt({
+								type: 'assign',
+								src: r,
+								dst: t
+							})
+							if (f) {
+								f(t)
+							}
+							return t
+						},
+						read: function(f) {
+							var r = locals.get(node.name)
+							if (f) {
+								f(r)
+							}
+							return r
+						},
+						write: function(f) {
+							var r = locals.get(node.name)
+							if (typeof f === 'function') {
+								f(r)
+							} else {
+								addStmt({
+									type: 'assign',
+									src: f,
+									dst: r
+								})
+							}
+							return r
+						},
+						readWrite: function(f) {
+							var r = locals.get(node.name)
+							f(r)
+							return r
+						}
 					}
 				}
 			case 'MemberExpression':
-				var obj = visitExpr(node.object)
-				var prty = node.computed ? visitExpr(node.property) : node.property.name
+				var obj = visitExpr(node.object, ANYWHERE)
+				var prty = node.computed ? visitExpr(node.property, ANYWHERE) : node.property.name
 				return {
 					readCopy: function() {
 						return this.read.apply(arguments)
@@ -757,7 +866,7 @@ function convertFunction(f) {
 		function fallbackCondition() {
 			var jump = block.jump = { 
 				type: 'if',
-				condition: visitExpr(node),
+				condition: visitExpr(node, ANYWHERE),
 				then: newBlock(),
 				else: newBlock()
 			}
@@ -768,7 +877,7 @@ function convertFunction(f) {
 		}
 		switch (node.type) {
 			case 'Literal':
-				var r = visitExpr(node)
+				var r = visitExpr(node, ANYWHERE)
 				var b = newBlock()
 				return {
 					whenTrue: { block: node.value ? block_idx : b, value: r },
@@ -921,7 +1030,7 @@ function convertFunction(f) {
 
 			case 'SequenceExpression':
 				for (var i=0; i<node.expressions.length-1; i++) {
-					visitExpr(node.expressions[i])
+					visitExpr(node.expressions[i], ANYWHERE)
 				}
 				return visitCondition(node.expressions[node.expressions.length-1], needValue)
 
@@ -936,7 +1045,7 @@ function convertFunction(f) {
 			case 'ArrayExpression':
 			case 'ObjectExpression':
 			case 'FunctionExpression':
-				var r = visitExpr(node)
+				var r = visitExpr(node, ANYWHERE)
 				var b = newBlock()
 				block.jump = { type: 'goto', target: b }
 				return {
@@ -946,6 +1055,7 @@ function convertFunction(f) {
 		}
 		throw new Error("visitCondition " + util.inspect(node))
 	}
+	return run()
 }
 
 function convert(ast) {
@@ -1030,7 +1140,7 @@ function toDot(cfg) {
 				return util.inspect(stmt)
 		}
 	}
-	function convertFunction(f) {
+	function functionToDot(f) {
 		if (f === null)
 			return
 		var block2id = new Map
@@ -1069,7 +1179,7 @@ function toDot(cfg) {
 		})
 	}
 	println("digraph {")
-	cfg.forEach(convertFunction)
+	cfg.forEach(functionToDot)
 	println("}")
 	return chunks.join('')
 }
