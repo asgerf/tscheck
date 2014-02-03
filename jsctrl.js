@@ -4,9 +4,11 @@ var esprima = require('esprima')
 var jsnorm = require('./jsnorm')
 var util = require('util')
 var Map = require('./map')
+require('sugar')
 
 //////////// AST INSTRUMENTATION /////////////////
 
+// TODO: regular expressions, delete operator
 
 // Returns the given AST node's immediate children as an array.
 // Property names that start with $ are considered annotations, and will be ignored.
@@ -83,6 +85,7 @@ function injectEnvs(node) {
             for (var i=0; i<node.params.length; i++) {
                 node.$env.put(node.params[i].name, node.params[i])
             }
+            node.$env.put('arguments', node)
             break;
         case 'FunctionDeclaration':
             var parent = getEnclosingFunction(node.$parent); // note: use getEnclosingFunction, because fun decls are lifted outside catch clauses
@@ -92,6 +95,7 @@ function injectEnvs(node) {
             for (var i=0; i<node.params.length; i++) {
                 node.$env.put(node.params[i].name, node.params[i])
             }
+            node.$env.put('arguments', node)
             break;
         case 'CatchClause':
             node.$env = new Map;
@@ -183,7 +187,7 @@ function markClosureVariables(ast) {
 				node.$locals = node.$env.clone()
 				break;
 			case 'Identifier':
-				if (classifyId(node).type === 'variable') {
+				if (classifyId(node).type === 'variable' && node.name !== 'arguments') {
 					var fun = getIdentifierScope(node)
 					if (fun.type !== 'Program' && !fun.$env.has(node.name)) {
 						// find function whose variable is being referenced
@@ -214,60 +218,17 @@ function prepareAST(ast) {
 
 ////////// TRANSLATION TO CONTROL FLOW GRAPH //////////
 
-/*
-
-type var = number
-type fun = number
-
-type Stmt = 
- | { type: 'read-var', var: string, dst: var }
- | { type: 'write-var', var: string, src: var }
- | { type: 'assign', src: var, dst: var }
- | { type: 'load', object: var, prty: var | string, dst: var }
- | { type: 'store', object: var, prty: var | string, src: var }
- | { type: 'const', dst: var, value: string | number | boolean | null | undefined }
- | { type: 'create-object', properties: Property[] }
- | { type: 'create-array', elements: Element[] }
- | { type: 'create-function', function: fun, dst: var }
- | { type: 'call-method', object: var, prty: var | string, arguments: var[] }
- | { type: 'call-function', function: var, arguments: var[] }
- | { type: 'call-constructor', function: var, arguments: var[] }
- | { type: 'unary', operator: string, argument: var }
- | { type: 'binary', operator: string, left: var, right: var }
-
-type Jump = 
- | { type: 'goto'; target: number }
- | { type: 'if'; condition: var; then: number; else: number }
- | { type: 'return', value: var | null, implicit: boolean }
- | { type: 'throw', value: var }
-
-type Block = { statements: Stmt[]; jump: Jump }
-
-type Function = {
-	parameters: string[]
-	blocks: Block[]
-}
-
-type Element = number | null
-
-type Property = {
-	key: string
-	value: number
-	kind: 'init' | 'get' | 'set'
-}
-
-*/
-
 function UnsupportedFeature() {}
 
 function convertFunction(f) {
 	var THIS = 0 // variable holding 'this'
 	var THIS_FN = 1 // variable holding function instance
+	var ARGUMENTS_ARRAY = 2
 	var blocks = []; // Block[]
 	var block = null; // number
 	var block_idx = -1;
 	var label2block = {} // string -> number
-	var next_var = 2;
+	var next_var = 3;
 	var locals = new Map
 
 	// decl_block contains parameter initialization and function declarations (added during AST walk)
@@ -288,6 +249,8 @@ function convertFunction(f) {
 				})
 			}
 		}
+		// initialize reference to arguments array
+		locals.put("arguments", ARGUMENTS_ARRAY)
 		// initialize parameters
 		var params = f.params || []
 		for (var i=0; i<params.length; i++) {
@@ -321,6 +284,7 @@ function convertFunction(f) {
 
 		return {
 			num_parameters: params.length,
+			variables: f.$env.keys().filter(function(v) {return !locals.has(v)}),
 			blocks: blocks
 		}
 	}
@@ -385,7 +349,8 @@ function convertFunction(f) {
 			case 'SwitchStatement':
 				throw new Error("Program not normalized");
 			case 'ReturnStatement':
-				block.jump = { type: 'return', value: node.argument ? visitExpr(node.argument, ANYWHERE) : null, implicit: false }
+				var r = node.argument ? visitExpr(node.argument, ANYWHERE) : null;
+				block.jump = { type: 'return', value: r, implicit: false }
 				setBlock(newBlock())
 				break;
 			case 'ThrowStatement':
@@ -429,17 +394,26 @@ function convertFunction(f) {
 			case 'FunctionDeclaration':
 				var old = block
 				setBlock(decl_block)
-				var v = newVar()
-				addStmt({
-					type: 'create-function',
-					function: node.$function_id,
-					dst: v
-				})
-				addStmt({
-					type: 'write-var',
-					var: node.id.name,
-					src: v
-				})
+				if (locals.has(node.id.name)) {
+					var v = locals.get(node.id.name)
+					addStmt({
+						type: 'create-function',
+						function: node.$function_id,
+						dst: v
+					})
+				} else {
+					var v = newVar()
+					addStmt({
+						type: 'create-function',
+						function: node.$function_id,
+						dst: v
+					})
+					addStmt({
+						type: 'write-var',
+						var: node.id.name,
+						src: v
+					})
+				}
 				block = old
 				break;
 			case 'VariableDeclaration':
@@ -550,6 +524,7 @@ function convertFunction(f) {
 					var r = visitExpr(node.right, lv)
 					return dst.write(r)
 				} else {
+					var rv = visitExpr(node.right, ANYWHERE)
 					var r = lv.readWrite(function(r) {
 						addStmt({
 							type: 'binary',
@@ -629,7 +604,7 @@ function convertFunction(f) {
 					blocks[cnd.whenFalse.block].jump = {type: 'goto', target: b}
 				})
 			case 'NewExpression':
-				var c = visitExpr(node.callee)
+				var c = visitExpr(node.callee, ANYWHERE)
 				var args = node.arguments.map(visitExprAnywhere)
 				return dst.write(function(r) {
 					addStmt({
@@ -1039,6 +1014,7 @@ function convertFunction(f) {
 			case 'BinaryExpression':
 			case 'UpdateExpression': 
 			case 'MemberExpression':
+			case 'Identifier':
 				return fallbackCondition()
 
 			case 'ThisExpression': // always true
@@ -1077,11 +1053,175 @@ function convert(ast) {
 	return functions
 }
 
+// ----------------------------
+// 		   PREDECESSORS 
+// ----------------------------
+
+function computePredecessors(f) {
+	f.blocks.forEach(function(b) {
+		b.$pred = []
+	})
+	f.blocks.forEach(function(b, i) {
+		b.$succ = []
+		switch (b.jump.type) {
+			case 'if':
+				b.$succ.push(b.jump.then)
+				b.$succ.push(b.jump.else)
+				break;
+			case 'goto':
+				b.$succ.push(b.jump.target)
+				break;
+		}
+		b.$succ.forEach(function(succ) {
+			f.blocks[succ].$pred.push(i)
+		})
+	})
+}
+
+// -----------------------
+// 		   LIVENESS 
+// -----------------------
+
+function getPrtyVars(prty) {
+	return typeof prty === 'number' ? [prty] : []
+}
+
+function getReadVariables(stmt) {
+	switch (stmt.type) {
+		case 'read-var':
+			return []
+		case 'write-var':
+			return [stmt.src]
+		case 'assign':
+			return [stmt.src]
+		case 'load':
+			return [stmt.object].concat(getPrtyVars(stmt.prty))
+		case 'store':
+			return [stmt.object, stmt.src].concat(getPrtyVars(stmt.prty))
+		case 'const':
+			return []
+		case 'create-object':
+			return stmt.properties.map(function(p) {return p.value})
+		case 'create-array':
+			return stmt.elements.filter(function(e) {return e !== null})
+		case 'create-function':
+			return []
+		case 'call-method':
+			return [stmt.object].concat(getPrtyVars(stmt.prty)).concat(stmt.arguments)
+		case 'call-function':
+			return [stmt.function].concat(stmt.arguments)
+		case 'call-constructor':
+			return [stmt.function].concat(stmt.arguments)
+		case 'unary':
+			return [stmt.argument]
+		case 'binary':
+			return [stmt.left, stmt.right]
+		default:
+			throw new Error("Unrecognized statement: " + util.inspect(stmt))
+	}
+}
+
+function getWrittenVariables(stmt) {
+	switch (stmt.type) {
+		case 'read-var':
+		case 'assign':
+		case 'load':
+		case 'const':
+		case 'create-object':
+		case 'create-array':
+		case 'create-function':
+		case 'call-method':
+		case 'call-function':
+		case 'call-constructor':
+		case 'unary':
+		case 'binary':
+			return [stmt.dst]
+		case 'write-var':
+		case 'store':
+			return []
+		default:
+			throw new Error("Unrecognized statement: " + util.inspect(stmt))
+	}
+}
+
+function computeLiveVariables(f) {
+	var worklist = []
+	function iterateWorklist() {
+		while (worklist.length > 0) {
+			var bi = worklist.pop()
+			var b = f.blocks[bi]
+			var live = b.$liveAfter.clone()
+			switch (b.jump.type) {
+				case 'return':
+				case 'throw':
+					if (b.jump.value !== null)
+						live[b.jump.value] = true;
+					break;
+				case 'if':
+					live[b.jump.condition] = true
+					break;
+			}
+			for (var i=b.statements.length-1; i>=0; i--) {
+				var stmt = b.statements[i]
+				var kill = getWrittenVariables(stmt)
+				var gen = getReadVariables(stmt)
+				kill.forEach(function(v) {
+					delete live[v]
+				})
+				gen.forEach(function(v) {
+					live[v] = true
+				})
+			}
+			if (!b.$liveBefore || live.length > b.$liveBefore.length) {
+				b.$liveBefore = live
+				b.$pred.forEach(function(p) {
+					var pred = f.blocks[p]
+					if (pred.jump.type === 'goto') {
+						// handled by aliasing
+						pred.$liveAfter = live
+						worklist.push(p)
+					} else {
+						var changed = false
+						live.forEach(function(x,v) {
+							if (!pred.$liveAfter[v]) {
+								pred.$liveAfter[v] = true
+								changed = true
+							}
+						})
+						if (changed) {
+							worklist.push(p)
+						}
+					}
+				})
+			}
+		}
+	}
+	// queue returns and throws
+	f.blocks.forEach(function(b,i) {
+		b.$liveAfter = []
+		if (b.jump.type === 'return' || b.jump.type === 'throw')
+			worklist.push(i)
+	})
+	iterateWorklist()
+	// queue statements that cannot reach return or throw
+	f.blocks.forEach(function(b,i) {
+		if (!b.$liveBefore) {
+			worklist.push(i)
+		}
+	})
+	iterateWorklist()
+}
+
+
+// -----------------------------
+//  	   GRAPHVIZ DOT
+// -----------------------------
+
 function escapeLabel(lbl) {
 	return lbl.replace(/[{}"<>]/g, '\\$&').replace(/\t/g,'\\t').replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/\f/g,'\\f')
 }
 
-function toDot(cfg) {
+function toDot(cfg, options) {
 	var next_node = 0
 	var chunks = []
 	function node() {
@@ -1140,8 +1280,10 @@ function toDot(cfg) {
 				return util.inspect(stmt)
 		}
 	}
-	function functionToDot(f) {
+	function functionToDot(f, idx) {
 		if (f === null)
+			return
+		if (options.index !== -1 && idx !== options.index)
 			return
 		var block2id = new Map
 		function blockId(b) {
@@ -1155,8 +1297,14 @@ function toDot(cfg) {
 			var labels = b.statements.map(function (stmt) {
 				return "{" + escapeLabel(stmtToString(stmt)) + "}"
 			})
+			if (options.live) {
+				labels.unshift("{live: " + b.$liveBefore.map(function(x,i) {return x && "v" + i}).compact().join(", ") + "}")
+			}
 			var successors = []
-			switch (b.jump.type) {
+			switch (b.jump && b.jump.type) {
+				case null:
+					labels.push("{null}")
+					break;
 				case 'goto':
 					successors.push({target:b.jump.target,  port:"s"})
 					labels.push("{goto}")
@@ -1168,10 +1316,13 @@ function toDot(cfg) {
 					break;
 				default:
 					if (b.jump.value !== null)
-						labels.push("{" + b.jump.type + " " + b.jump.value + "}")
+						labels.push("{" + b.jump.type + " v" + b.jump.value + "}")
 					else
 						labels.push("{" + b.jump.type + "}")
 			}
+			// if (options.live) {
+			// 	labels.push("{live: " + b.$liveAfter.map(function(x,i) {return x && "v" + i}).compact().join(", ") + "}")
+			// }
 			println("  ", blockId(bn), ' [shape=record,label="{', labels.join('|'), '}"]')
 			successors.forEach(function(sc) {
 				println("  ", blockId(bn), " -> ", blockId(sc.target), ' [headport=n,tailport="', sc.port, '"]')
@@ -1184,9 +1335,16 @@ function toDot(cfg) {
 	return chunks.join('')
 }
 
+
 // -----------------------
 // 		   MAIN
 // -----------------------
+
+module.exports = convert
+
+function table2list(x) {
+	return x.map(function(y,i) {return y && i}).compact()
+}
 
 function main() {
 	var fs = require('fs')
@@ -1195,6 +1353,8 @@ function main() {
 	program.usage("FILE.js [options]")
 	program.option('--dot', 'Output as Graphviz dot')
 	program.option('--pretty', 'Output as pretty JSON (not real JSON)')
+	program.option('--live', 'Include live variable information')
+	program.option('--index <N>', 'Print only the Nth function (N=0 for top-level scope)', Number, -1)
 	program.parse(process.argv)
 
 	if (program.args.length < 1)
@@ -1205,9 +1365,22 @@ function main() {
 	var ast = esprima.parse(text)
 	var cfg = convert(ast)
 
+	cfg.forEach(function(f) {
+		computePredecessors(f)
+		computeLiveVariables(f)
+	})
+
 	if (program.dot) {
-		console.log(toDot(cfg))
+		console.log(toDot(cfg, program))
 	} else if (program.pretty) {
+		if (program.live) {
+			cfg.forEach(function(f) {
+				f.blocks.forEach(function(b) {
+					b.$liveAfter = table2list(b.$liveAfter)
+					b.$liveBefore = table2list(b.$liveBefore)
+				})
+			})
+		}
 		console.log(util.inspect(cfg, {depth:null}))
 	} else {
 		console.log(JSON.stringify(cfg))

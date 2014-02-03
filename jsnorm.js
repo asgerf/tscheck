@@ -285,7 +285,7 @@ function normalize(ast) {
 									operator: '=',
 									left: { type: 'Identifier', name: casevar },
 									right: {
-										type: 'BinaryExpression',
+										type: 'LogicalExpression',
 										operator: '||',
 										left: { type: 'Identifier', name: casevar },
 										right: {

@@ -87,6 +87,16 @@ Map.prototype.json = function() {
     }
     return result;
 }
+Map.prototype.keys = function() {
+    var result = []
+    for (var k in this) {
+        if (!this.hasOwnProperty(k))
+            continue;
+        var k = k.substring(1)
+        result.push(k)
+    }
+    return result
+}
 
 // Specialized methods
 Map.prototype.push = function(key, val) {

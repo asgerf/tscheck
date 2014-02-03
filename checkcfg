@@ -1,0 +1,3 @@
+set -e
+./jsctrl.js --dot --live $* | dot -Tpng -o cfg.png
+xdg-open cfg.png
