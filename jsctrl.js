@@ -354,7 +354,8 @@ function convertFunction(f) {
 				setBlock(newBlock())
 				break;
 			case 'ThrowStatement':
-				block.jump = { type: 'throw', value: visitExpr(node.argument, ANYWHERE) }
+				var r = visitExpr(node.argument, ANYWHERE)
+				block.jump = { type: 'throw', value: r }
 				setBlock(newBlock())
 				break;
 			case 'TryStatement':
@@ -363,9 +364,10 @@ function convertFunction(f) {
 				var entry = newBlock();
 				block.jump = { type: 'goto', target: entry }
 				setBlock(entry)
+				var c = visitExpr(node.test, ANYWHERE)
 				var jump = block.jump = {
 					type: 'if',
-					condition: visitExpr(node.test, ANYWHERE),
+					condition: c,
 					then: newBlock(),
 					else: newBlock()
 				};
@@ -379,9 +381,10 @@ function convertFunction(f) {
 				block.jump = { type: 'goto', target: entry }
 				setBlock(entry)
 				visitStmt(node.body)
+				var c = visitExpr(node.test, ANYWHERE)
 				var jump = block.jump = {
 					type: 'if',
-					condition: visitExpr(node.test, ANYWHERE),
+					condition: c,
 					then: entry,
 					else: newBlock()
 				};
@@ -563,45 +566,52 @@ function convertFunction(f) {
 				}
 			case 'LogicalExpression':
 				return dst.write(function(r) {
+					var b = newBlock()
 					var cnd = visitCondition(node.left, KEEP_VALUE)
 					switch (node.operator) {
 						case '&&':
 							setBlock(cnd.whenTrue.block)
 							visitExpr(node.right, varDst(r))
+							block.jump = {type: 'goto', target: b}
+
 							setBlock(cnd.whenFalse.block)
 							addStmt({
 								type: 'assign',
 								src: cnd.whenFalse.result,
 								dst: r
 							})
+							block.jump = {type: 'goto', target: b}
 							break;
 						case '||':
 							setBlock(cnd.whenFalse.block)
 							visitExpr(node.right, varDst(r))
+							block.jump = {type: 'goto', target: b}
+
 							setBlock(cnd.whenTrue.block)
 							addStmt({
 								type: 'assign',
 								src: cnd.whenTrue.result,
 								dst: r
 							})
+							block.jump = {type: 'goto', target: b}
 							break;
 					}
-					var b = newBlock()
 					setBlock(b)
-					blocks[cnd.whenTrue.block].jump = {type: 'goto', target: b}
-					blocks[cnd.whenFalse.block].jump = {type: 'goto', target: b}
 				})
 			case 'ConditionalExpression':
 				var cnd = visitCondition(node.test, DISCARD_VALUE)
 				return dst.write(function(r) {
+					var b = newBlock()
+					
 					setBlock(cnd.whenTrue.block)
 					visitExpr(node.consequent, varDst(r))
+					block.jump = {type: 'goto', target: b}
+
 					setBlock(cnd.whenFalse.block)
 					visitExpr(node.alternate, varDst(r))
-					var b = newBlock()
+					block.jump = {type: 'goto', target: b}
+
 					setBlock(b)
-					blocks[cnd.whenTrue.block].jump = {type: 'goto', target: b}
-					blocks[cnd.whenFalse.block].jump = {type: 'goto', target: b}
 				})
 			case 'NewExpression':
 				var c = visitExpr(node.callee, ANYWHERE)
@@ -839,15 +849,16 @@ function convertFunction(f) {
 	var KEEP_VALUE = true
 	function visitCondition(node, needValue) {
 		function fallbackCondition() {
+			var r = visitExpr(node, ANYWHERE)
 			var jump = block.jump = { 
 				type: 'if',
-				condition: visitExpr(node, ANYWHERE),
+				condition: r,
 				then: newBlock(),
 				else: newBlock()
 			}
 			return {
-				whenTrue: { block: jump.then, result: jump.condition },
-				whenFalse: { block: jump.else, result: jump.condition }
+				whenTrue: { block: jump.then, result: r },
+				whenFalse: { block: jump.else, result: r }
 			}
 		}
 		switch (node.type) {
@@ -1044,7 +1055,11 @@ function convert(ast) {
 		} catch (e) {
 			// TODO: also reject functions that are lexically nested inside a `with` statement
 			if (e instanceof UnsupportedFeature)
-				f = null
+				f = {
+					num_parameters: fun.params.length,
+					variables: fun.$env.keys(),
+					blocks: null
+				}
 			else
 				throw e
 		}
@@ -1058,12 +1073,14 @@ function convert(ast) {
 // ----------------------------
 
 function computePredecessors(f) {
+	if (!f.blocks)
+		return
 	f.blocks.forEach(function(b) {
 		b.$pred = []
 	})
 	f.blocks.forEach(function(b, i) {
 		b.$succ = []
-		switch (b.jump.type) {
+		switch (b.jump && b.jump.type) {
 			case 'if':
 				b.$succ.push(b.jump.then)
 				b.$succ.push(b.jump.else)
@@ -1145,6 +1162,8 @@ function getWrittenVariables(stmt) {
 }
 
 function computeLiveVariables(f) {
+	if (!f.blocks)
+		return
 	var worklist = []
 	function iterateWorklist() {
 		while (worklist.length > 0) {
@@ -1212,6 +1231,25 @@ function computeLiveVariables(f) {
 	iterateWorklist()
 }
 
+// -----------------------------
+//  	   SANITY CHECK
+// -----------------------------
+
+function sanityCheck(cfg) {
+	cfg.forEach(checkFunction)
+
+	function checkFunction(f, fi) {
+		if (!f.blocks)
+			return
+		f.blocks.forEach(function(b, bi) {
+			if (!b)
+				console.warn("Null block at function " + fi + ", block " + bi)
+			if (!b.jump)
+				console.warn("Null jump at function " + fi + ", block " + bi)
+		})
+	}
+
+}
 
 // -----------------------------
 //  	   GRAPHVIZ DOT
@@ -1281,7 +1319,7 @@ function toDot(cfg, options) {
 		}
 	}
 	function functionToDot(f, idx) {
-		if (f === null)
+		if (f.blocks === null)
 			return
 		if (options.index !== -1 && idx !== options.index)
 			return
@@ -1365,11 +1403,15 @@ function main() {
 	var ast = esprima.parse(text)
 	var cfg = convert(ast)
 
-	cfg.forEach(function(f) {
-		computePredecessors(f)
-		computeLiveVariables(f)
-	})
+	sanityCheck(cfg)
 
+	if (program.live) {
+		cfg.forEach(function(f) {
+			computePredecessors(f)
+			computeLiveVariables(f)
+		})
+	}
+	
 	if (program.dot) {
 		console.log(toDot(cfg, program))
 	} else if (program.pretty) {

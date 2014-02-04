@@ -4,7 +4,7 @@
 function __interpreter(n, outerEnv, program) {
 	var f = program[n]
 	return function self() {
-		if (f === null) {
+		if (f.blocks === null) {
 			throw new Error("Function uses unsupported feature")
 		}
 		// console.log(n)

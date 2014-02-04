@@ -1,7 +1,7 @@
 outdir="output/normtests"
 mkdir -p $outdir
 rm -rf $outdir/*
-for file in normtests/*.js
+for file in ctrltests/*.js
 do
 	name=`basename $file`
 	node $file &> $outdir/$name-orig.out
