@@ -318,7 +318,7 @@ function convertFunction(f) {
 				visitExpr(node.expression, ANYWHERE);
 				break;
 			case 'IfStatement':
-				var cnd = visitCondition(node.test, DISCARD_VALUE)
+				var cnd = visitCondition(node.test, null)
 				var exit = newBlock()
 				setBlock(cnd.whenTrue.block)
 				visitStmt(node.consequent)
@@ -567,7 +567,7 @@ function convertFunction(f) {
 			case 'LogicalExpression':
 				return dst.write(function(r) {
 					var b = newBlock()
-					var cnd = visitCondition(node.left, KEEP_VALUE)
+					var cnd = visitCondition(node.left, r)
 					switch (node.operator) {
 						case '&&':
 							setBlock(cnd.whenTrue.block)
@@ -575,11 +575,6 @@ function convertFunction(f) {
 							block.jump = {type: 'goto', target: b}
 
 							setBlock(cnd.whenFalse.block)
-							addStmt({
-								type: 'assign',
-								src: cnd.whenFalse.result,
-								dst: r
-							})
 							block.jump = {type: 'goto', target: b}
 							break;
 						case '||':
@@ -588,18 +583,13 @@ function convertFunction(f) {
 							block.jump = {type: 'goto', target: b}
 
 							setBlock(cnd.whenTrue.block)
-							addStmt({
-								type: 'assign',
-								src: cnd.whenTrue.result,
-								dst: r
-							})
 							block.jump = {type: 'goto', target: b}
 							break;
 					}
 					setBlock(b)
 				})
 			case 'ConditionalExpression':
-				var cnd = visitCondition(node.test, DISCARD_VALUE)
+				var cnd = visitCondition(node.test, null)
 				return dst.write(function(r) {
 					var b = newBlock()
 					
@@ -844,12 +834,12 @@ function convertFunction(f) {
 			default: throw new Error("Unrecognized lvalue type: " + node.type)
 		}
 	}
-	// { whenTrue: {block:number, result:number}, whenFalse: ... }
+	// { whenTrue: {block:number}, whenFalse: ... }
 	var DISCARD_VALUE = false
 	var KEEP_VALUE = true
-	function visitCondition(node, needValue) {
+	function visitCondition(node, resultVar) {
 		function fallbackCondition() {
-			var r = visitExpr(node, ANYWHERE)
+			var r = visitExpr(node, resultVar === null ? ANYWHERE : varDst(resultVar))
 			var jump = block.jump = { 
 				type: 'if',
 				condition: r,
@@ -857,78 +847,49 @@ function convertFunction(f) {
 				else: newBlock()
 			}
 			return {
-				whenTrue: { block: jump.then, result: r },
-				whenFalse: { block: jump.else, result: r }
+				whenTrue: { block: jump.then },
+				whenFalse: { block: jump.else }
 			}
 		}
 		switch (node.type) {
 			case 'Literal':
-				var r = visitExpr(node, ANYWHERE)
+				var r = visitExpr(node, resultVar === null ? ANYWHERE : varDst(resultVar))
 				var b = newBlock()
 				return {
-					whenTrue: { block: node.value ? block_idx : b, value: r },
-					whenFalse: { block: node.value ? b : block_idx, value: r }
+					whenTrue: { block: node.value ? block_idx : b },
+					whenFalse: { block: node.value ? b : block_idx }
 				}
 
 			case 'LogicalExpression':
-				var cnd = visitCondition(node.left, needValue)
+				var cnd = visitCondition(node.left, resultVar)
 				var b = newBlock()
-				var t = needValue ? newVar() : null
 				switch (node.operator) {
 					case '&&':
 						setBlock(cnd.whenFalse.block)
-						if (needValue) {
-							addStmt({
-								type: 'assign',
-								src: cnd.whenFalse.result,
-								dst: t
-							})
-						}
 						block.jump = { type: 'goto', target: b }
 
 						setBlock(cnd.whenTrue.block)
-						var cnd2 = visitCondition(node.right, needValue)
+						var cnd2 = visitCondition(node.right, resultVar)
 
 						setBlock(cnd2.whenFalse.block)
-						if (needValue) {
-							addStmt({
-								type: 'assign',
-								src: cnd.whenFalse.result,
-								dst: t
-							})
-						}
 						block.jump = { type: 'goto', target: b }
 
 						return {
 							whenTrue: cnd2.whenTrue,
-							whenFalse: { block: b, result: t }
+							whenFalse: { block: b }
 						}
 					case '||':
 						setBlock(cnd.whenTrue.block)
-						if (needValue) {
-							addStmt({
-								type: 'assign',
-								src: cnd.whenTrue.result,
-								dst: t
-							})
-						}
 						block.jump = { type: 'goto', target: b }
 
 						setBlock(cnd.whenFalse.block)
-						var cnd2 = visitCondition(node.right, needValue)
+						var cnd2 = visitCondition(node.right, resultVar)
 
 						setBlock(cnd2.whenTrue.block)
-						if (needValue) {
-							addStmt({
-								type: 'assign',
-								src: cnd.whenTrue.result,
-								dst: t
-							})
-						}
 						block.jump = { type: 'goto', target: b }
 
 						return {
-							whenTrue: { block: b, result: t },
+							whenTrue: { block: b },
 							whenFalse: cnd2.whenFalse
 						}
 				}
@@ -936,41 +897,27 @@ function convertFunction(f) {
 
 			case 'ConditionalExpression':
 				var bT = newBlock(), bF = newBlock()
-				var rT = needValue ? newVar() : null;
-				var rF = needValue ? newVar() : null;
-				var cnd = visitCondition(node.test, DISCARD_VALUE)
+				var cnd = visitCondition(node.test, null)
 				setBlock(cnd.whenTrue.block)
-				var cndT = visitCondition(node.consequent, needValue)
+				var cndT = visitCondition(node.consequent, resultVar)
 				setBlock(cnd.whenFalse.block)
-				var cndF = visitCondition(node.alternate, needValue)
+				var cndF = visitCondition(node.alternate, resultVar)
 
 				setBlock(cndT.whenTrue)
-				if (needValue) {
-					addStmt({ type: 'assign', src: cndT.whenTrue.result, dst: rT })
-				}
 				block.jump = { type: 'goto', target: bT }
 
 				setBlock(cndF.whenTrue)
-				if (needValue) {
-					addStmt({ type: 'assign', src: cndF.whenTrue.result, dst: rT })
-				}
 				block.jump = { type: 'goto', target: bT }
 
 				setBlock(cndT.whenFalse)
-				if (needValue) {
-					addStmt({ type: 'assign', src: cndT.whenFalse.result, dst: rF })
-				}
 				block.jump = { type: 'goto', target: bF }
 
 				setBlock(cndF.whenFalse)
-				if (needValue) {
-					addStmt({ type: 'assign', src: cndF.whenFalse.result, dst: rF })
-				}
 				block.jump = { type: 'goto', target: bF }
 
 				return {
-					whenTrue: { block: bT, result: rT },
-					whenFalse: { block: bF, result: rF }
+					whenTrue: { block: bT },
+					whenFalse: { block: bF }
 				}
 				
 			case 'AssignmentExpression':
@@ -978,37 +925,44 @@ function convertFunction(f) {
 					return fallbackCondition()
 				}
 				var lv = visitLvalue(node.left)
-				var cnd = visitCondition(node.right, KEEP_VALUE)
+				var cnd = visitCondition(node.right, resultVar)
+
 				setBlock(cnd.whenTrue.block)
-				lv.write(cnd.whenTrue.result)
+				lv.write(resultVar)
+				var bT = block_idx
+
 				setBlock(cnd.whenFalse.block)
-				lv.write(cnd.whenFalse.result)
-				return cnd
+				lv.write(resultVar)
+				var bF = block_idx
+
+				return {
+					whenTrue: bT,
+					whenFalse: bF
+				}
 
 			case 'UnaryExpression':
 				switch (node.operator) {
 					case '!':
-						var r = needValue ? newVar() : null
-						var cnd = visitCondition(node.argument, DISCARD_VALUE)
-						setBlock(cnd.whenTrue.block)
-						if (needValue) {
+						var cnd = visitCondition(node.argument, null)
+						if (resultVar !== null) {
+							setBlock(cnd.whenTrue.block)
 							addStmt({
 								type: 'const',
 								value: false,
-								dst: r
+								dst: resultVar
 							})
 						}
-						setBlock(cnd.whenFalse.block)
-						if (needValue) {
+						if (resultVar !== null) {
+							setBlock(cnd.whenFalse.block)
 							addStmt({
 								type: 'const',
 								value: true,
-								dst: r
+								dst: resultVar
 							})
 						}
 						return {
-							whenTrue: { block: cnd.whenFalse.block, result: r },
-							whenFalse: { block: cnd.whenTrue.block, result: r },
+							whenTrue: { block: cnd.whenFalse.block },
+							whenFalse: { block: cnd.whenTrue.block },
 						}
 					default:
 						return fallbackCondition()
@@ -1018,7 +972,7 @@ function convertFunction(f) {
 				for (var i=0; i<node.expressions.length-1; i++) {
 					visitExpr(node.expressions[i], ANYWHERE)
 				}
-				return visitCondition(node.expressions[node.expressions.length-1], needValue)
+				return visitCondition(node.expressions[node.expressions.length-1], resultVar)
 
 			case 'NewExpression': // nothing to do
 			case 'CallExpression':
@@ -1066,6 +1020,66 @@ function convert(ast) {
 		functions.push(f)
 	})
 	return functions
+}
+
+
+// -----------------------------------
+// 		   SHORT-CUTTING GOTOS 
+// -----------------------------------
+
+function shortcutGotos(f) {
+	if (!f.blocks)
+		return
+	function getDst(bi) {
+		var b = f.blocks[bi]
+		if (b.$visiting) {
+			return bi
+		}
+		var result = bi;
+		if (b.jump.type === 'goto' && b.statements.length === 0) {
+			result = b.jump.target = getDst(b.jump.target)
+		}
+		delete b.$visiting
+		return result
+	}
+	function shortcut(bi) {
+		var b = f.blocks[bi]
+		switch (b.jump.type) {
+			case 'goto':
+				b.jump.target = getDst(b.jump.target)
+				break;
+			case 'if':
+				b.jump.then = getDst(b.jump.then)
+				b.jump.else = getDst(b.jump.else)
+				break;
+		}
+	}
+	for (var i=0; i<f.blocks.length; i++) {
+		shortcut(i)
+	}
+
+	var bi2index = [] // old index -> new index
+	var newBlocks = [] // new index -> block
+	function reach(bi) {
+		if (typeof bi2index[bi] === 'number') {
+			return bi2index[bi]
+		}
+		var b = f.blocks[bi]
+		var index = bi2index[bi] = newBlocks.length
+		newBlocks.push(b)
+		switch (b.jump.type) {
+			case 'goto':
+				b.jump.target = reach(b.jump.target)
+				break;
+			case 'if':
+				b.jump.then = reach(b.jump.then)
+				b.jump.else = reach(b.jump.else)
+				break;
+		}
+		return index
+	}
+	reach(0)
+	f.blocks = newBlocks
 }
 
 // ----------------------------
@@ -1378,7 +1392,16 @@ function toDot(cfg, options) {
 // 		   MAIN
 // -----------------------
 
-module.exports = convert
+function jsctrl(ast) {
+	var cfg = convert(ast)
+	cfg.forEach(shortcutGotos)
+	return cfg
+}
+module.exports = jsctrl
+
+// --------------------------
+// 		   ENTRY POINT
+// --------------------------
 
 function table2list(x) {
 	return x.map(function(y,i) {return y && i}).compact()
@@ -1401,7 +1424,7 @@ function main() {
 	var file = program.args[0]
 	var text = fs.readFileSync(file, 'utf8')
 	var ast = esprima.parse(text)
-	var cfg = convert(ast)
+	var cfg = jsctrl(ast)
 
 	sanityCheck(cfg)
 
