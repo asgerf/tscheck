@@ -20,7 +20,6 @@ function __interpreter(n, outerEnv, program) {
 		for (var i=0; i<f.num_parameters; i++) {
 			locals[i+3] = arguments[i];
 		}
-		// TODO: store special locals (this, thisfn, parameters, TODO: argument array)
 		function getEnvWithVar(v) {
 			var e = env
 			while (!(v in e) && '@outer' in e) {
