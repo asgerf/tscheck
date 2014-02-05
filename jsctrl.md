@@ -33,8 +33,9 @@ Type Schema
 
 The following shows the structure of the control-flow graph:
 
-	type var = number
-	type fun = number
+	type var = number    // temporary variable
+	type fun = number    // index of function
+	type label = number  // index of block
 
 	type Stmt = 
 	 | { type: 'read-var', var: string, dst: var }
@@ -53,8 +54,8 @@ The following shows the structure of the control-flow graph:
 	 | { type: 'binary', operator: string, left: var, right: var }
 
 	type Jump = 
-	 | { type: 'goto'; target: number }
-	 | { type: 'if'; condition: var; then: number; else: number }
+	 | { type: 'goto'; target: label }
+	 | { type: 'if'; condition: var; then: label; else: label }
 	 | { type: 'return', value: var | null, implicit: boolean }
 	 | { type: 'throw', value: var }
 
@@ -62,12 +63,19 @@ The following shows the structure of the control-flow graph:
 
 	type Element = number | null
 
-	type Property = {
-		key: string
-		value: number
-		kind: 'init' | 'get' | 'set'
+	type Property = ValueProperty | AccessorProperty
+	type ValueProperty = {
+		type: 'value',
+		name: string,
+		value: var
+	},
+	type AccessorProperty = {
+		type: 'accessor',
+		name: string,
+		get: var | null,
+		set: var | null
 	}
-
+	
 	type PrtyRef = var | string
 
 	type Function = {

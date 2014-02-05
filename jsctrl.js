@@ -477,15 +477,39 @@ function convertFunction(f) {
 				})
 			case 'ObjectExpression':
 				return dst.write(function(r) {
+					var name2prty = new Map
+					var properties = []
+					node.properties.forEach(function(prty) {
+						var name = prty.key.type === 'Literal' ? String(prty.key.value) : prty.key.name
+						var v = visitExpr(prty.value, ANYWHERE)
+						if (prty.kind === 'init') {
+							properties.push({
+								type: 'value',
+								name: name,
+								value: v
+							})
+						} else {
+							var cprop = name2prty.get(name)
+							if (!cprop) {
+								cprop = {
+									type: 'accessor',
+									name: name,
+									get: null,
+									set: null
+								}
+								name2prty.put(name, cprop)
+								properties.push(cprop)
+							}
+							if (prty.kind === 'get') {
+								cprop.get = v
+							} else {
+								cprop.set = v
+							}
+						}
+					})
 					addStmt({
 						type: 'create-object',
-						properties: node.properties.map(function(prty) {
-							return {
-								key: prty.key.type === 'Literal' ? String(prty.key.value) : prty.key.name,
-								kind: prty.kind,
-								value: visitExpr(prty.value, ANYWHERE)
-							}
-						}),
+						properties: properties,
 						dst: r
 					})
 				})

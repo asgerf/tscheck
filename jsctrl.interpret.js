@@ -69,23 +69,16 @@ function __interpreter(n, outerEnv, program) {
 					case 'create-object':
 						var obj = {}
 						stmt.properties.forEach(function(prty) {
-							if (prty.kind === 'init') {
-								obj[prty.key] = locals[prty.value]
-							} else if (prty.kind === 'get') {
-								Object.defineProperty(obj, prty.key, {
+							if (prty.type === 'value') {
+								obj[prty.name] = locals[prty.value]
+							} else {
+								Object.defineProperty(obj, prty.name, {
 									configurable: true,
 									enumerable: true,
-									writable: true,
-									get: locals[prty.value]
+									get: prty.get && locals[prty.get],
+									set: prty.set && locals[prty.set]
 								})
-							} else if (prty.kind === 'set') {
-								Object.defineProperty(obj, prty.key, {
-									configurable: true,
-									enumerable: true,
-									writable: true,
-									set: locals[prty.value]
-								})
-							} else throw new Error("prty kind")
+							}
 						})
 						locals[stmt.dst] = obj
 						break;
