@@ -979,181 +979,237 @@ function formatValue(value, depth) {
 // 		Static Analysis
 // --------------------------
 
-// Returns the given AST node's immediate children as an array.
-// Property names that start with $ are considered annotations, and will be ignored.
-function children(node) {
-    var result = [];
-    for (var k in node) {
-        if (!node.hasOwnProperty(k))
-            continue;
-        if (k[0] === '$')
-            continue;
-        var val = node[k];
-        if (!val)
-            continue;
-        if (typeof val === "object" && typeof val.type === "string") {
-            result.push(val);
-        }
-        else if (val instanceof Array) {
-            for (var i=0; i<val.length; i++) {
-                var elm = val[i];
-                if (typeof elm === "object" && typeof elm.type === "string") {
-                    result.push(elm);
-                }
-            }
-        } 
-    }
-    return result;
+var cfg = sourceFileAst && jsctrl(sourceFileAst)
+
+function getFunction(id) {
+	return cfg.functions[id]
 }
 
-// Assigns parent pointers to each node. The parent pointer is called $parent.
-function injectParentPointers(node, parent) {
-    node.$parent = parent;
-    var list = children(node);
-    for (var i=0; i<list.length; i++) {
-        injectParentPointers(list[i], node);
-    }
-}
-
-// Returns the function or program immediately enclosing the given node, possibly the node itself.
-function getEnclosingFunction(node) {
-    while  (node.type !== 'FunctionDeclaration' && 
-            node.type !== 'FunctionExpression' && 
-            node.type !== 'Program') {
-        node = node.$parent;
-    }
-    return node;
-}
-
-// Returns the function, program or catch clause immediately enclosing the given node, possibly the node itself.
-function getEnclosingScope(node) {
-    while  (node.type !== 'FunctionDeclaration' && 
-            node.type !== 'FunctionExpression' && 
-            node.type !== 'CatchClause' &&
-            node.type !== 'Program') {
-        node = node.$parent;
-    }
-    return node;
-}
-
-// Injects an the following into functions, programs, and catch clauses
-// - $env: Map from variable names in scope to Identifier at declaration
-// - $depth: nesting depth from top-level
-function injectEnvs(node) {
-    switch (node.type) {
-        case 'Program':
-            node.$env = new Map;
-            node.$depth = 0;
-            break;
-        case 'FunctionExpression':
-            node.$env = new Map;
-            node.$depth = 1 + getEnclosingScope(node.$parent).$depth;
-            if (node.id) {
-                node.$env.put(node.id.name, node.id)
-            }
-            for (var i=0; i<node.params.length; i++) {
-                node.$env.put(node.params[i].name, node.params[i])
-            }
-            break;
-        case 'FunctionDeclaration':
-            var parent = getEnclosingFunction(node.$parent); // note: use getEnclosingFunction, because fun decls are lifted outside catch clauses
-            node.$env = new Map;
-            node.$depth = 1 + parent.$depth;
-            parent.$env.put(node.id.name, node.id)
-            for (var i=0; i<node.params.length; i++) {
-                node.$env.put(node.params[i].name, node.params[i])
-            }
-            break;
-        case 'CatchClause':
-            node.$env = new Map;
-            node.$env.put(node.param.name, node.param)
-            node.$depth = 1 + getEnclosingScope(node.$parent).$depth;
-            break;
-        case 'VariableDeclarator':
-            var parent = getEnclosingFunction(node) // note: use getEnclosingFunction, because vars ignore catch clauses
-            parent.$env.put(node.id.name, node.id)
-            break;
-    }
-    children(node).forEach(injectEnvs)
-}
-
-function numberSourceFileFunctions() {
-	if (sourceFileAst === null)
-		return
-	var array = []
-	function add(x) {
-		x.$function_id = array.length;
-		array.push(x)
+var Keys = {
+	this: 0,
+	this_function: 1,
+	arguments_array: 2,
+	current_env: '!env',
+	parameter: function(index) {
+		return index + 3
 	}
-	function visit(node) {
-		if (node.type === 'Program' || node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression') {
-			add(node)
+	local: function(id) {
+		return id
+	},
+	prty: function(object,name) {
+		return object + '.' + name
+	},
+	env: function(object) {
+		return object + '!env'
+	}
+}
+
+function AbstractState() {
+	this.heap_counter = 0;
+}
+AbstractState.prototype.get = function(key) {
+	return this[key]
+}
+AbstractState.prototype.put = function(key, value) {
+	this[key] = value
+}
+AbstractState.prototype.nextHeapLocation = function() {
+	return snapshot.heap.length + this.heap_counter++;
+}
+AbstractState.prototype.clone = function() {
+	var result = new AbstractState
+	for (var k in this) {
+		if (this.hasOwnProperty(k)) {
+			result[k] = this[k]
 		}
-		children(node).forEach(visit)
 	}
-	visit(sourceFileAst)
-	sourceFileAst.$id2function = array;
+	return result
 }
 
-function numberNodes() {
-	var id=0
-	function visit(node) {
-		node.$id = ++id;
-		children(node).forEach(visit)
-	}
-	visit(sourceFileAst)
-}
 
-function prepareAST() {
-	require('jsnorm')(sourceFileAst) // desugar
-	injectParentPointers(sourceFileAst)
-	injectEnvs(sourceFileAst)
-	numberSourceFileFunctions()	
-	numberNodes()
-}
-if (sourceFileAst !== null) {
-	prepareAST()
-}
-
-function findFunction(id) {
-	if (sourceFileAst === null)
-		return null;
-	return sourceFileAst.$id2function[id]
-}
-
-function checkCallSignature(call, receiverKey, objKey, path) {
-	var obj = lookupObject(objKey);
-	if (!obj.function) {
+function checkCallSignature(call, receiverKey, functionKey, path) {
+	var functionObj = lookupObject(functionKey)
+	if (!functionObj.function) {
 		console.log(path + ": expected " + formatTypeCall(call) + " but found non-function object")
-		return;
+		return
 	}
-	switch (obj.function.type) {
+	if (!cfg)
+		return // cannot analyze function without source code
+	switch (functionObj.function.type) {
+		case 'user':
+			var fun = getFunction(functionObj.function.id)
+			if (!fun.blocks)
+				return // function uses unsupported feature
+			var state = new AbstractState
+			state.put(Keys.this, {type: 'value', value: {key: receiverKey}})
+			state.put(Keys.this_function, {type: 'value', value: {key: functionKey}})
+			state.put(Keys.arguments_array, {type: 'any'}) // TODO: model arguments array?
+			for (var i=0; i<fun.num_parameters; i++) {
+				var t = i < call.parameters.length ? call.parameters[i].type : {type: 'value', value: undefined}
+				state.put(Keys.parameter(i), t)
+			}
+			var envKey = state.nextHeapLocation()
+			cfg.variables.forEach(function(varName) {
+				state.put(Keys.prty(envKey, varName), {type: 'value', value: undefined})
+			})
+			state.put(Keys.env(envKey), {type: 'value', value: functionObj.env})
+			state.put(Keys.current_env, {type: 'value', value: {key: envKey}})
+			var outputState = analyzeFunction(f,state)
+			break;
+		case 'bind':
+			break; // TODO: check bound functions
 		case 'native':
 		case 'unknown':
-			break; // XXX: is there a need for something useful here?
-		case 'bind':
-			break; // TODO: support bound functions
-		case 'user':
-			var fun = findFunction(obj.function.id)
-
-			if (!fun)
-				return
-			// if (fun.params.length !== call.parameters.length) {
-			// 	console.log(path + ": function takes " + fun.params.length + " params but " + call.parameters.length + " were declared in call signature")
-			// }
-			// console.log(path + ": function defined on line " + fun.loc.start.line)
-			var ok = analyzeFunction(fun, obj.function.env, {type:'value', value:{key:receiverKey}}, call.parameters)
-			if (!ok) {
-				console.log(path + ": call signature does not match")
-			}
 			break;
 	}
 }
 
+function analyzeFunction(f, initialState) { // returns new state
+	var block2state = [initialState]
+	var worklist = [0]
+	while (worklist.length > 0) {
+		var blockidx = worklist.pop()
+		var block = f.blocks[blockidx]
+		var state = block2state[blockidx].clone()
+		for (var i=0; i<block.statements.length; ++i) {
+			analyzeStmt(block.statements[i], state)
+		}
+	}
+}
+function analyzeStmt(stmt, state) { // mutates state
+	function lookupVariable(varName) {
+		var env = state.get(Keys.current_env).key
+		while (true) {
+			var value = state.get(Keys.prty(env,varName))
+			if (value) {
+				return {env:env, value:value}
+			}
+			if (env < snapshot.heap.length) {
+				var heapEnv = lookupObject(env)
+				var prty = heapEnv.propertyMap.get(varName)
+				if (prty) {
+					return {env:env, value:{type:'value', value:prty.value}}
+				}
+				if (heapEnv.env) {
+					env = heapEnv.env.key
+				} else {
+					return env // reached global object
+				}
+			} else {
+				env = state.get(Keys.env(env)).key
+			}
+		}
+	}
+	function resolvePrty(prty) {
+		if (typeof prty === 'string')
+			return {type: 'value', value: string}
+		var v = state.get(Keys.local(prty))
+		return abstractToString(v)
+	}
+	switch (stmt.type) {
+		case 'read-var':
+			var v = lookupVariable(stmt.var)
+			state.put(Keys.local(stmt.dst), v.value)
+			break;
+		case 'write-var':
+			var v = lookupVariable(stmt.var)
+			state.put(Keys.prty(v.env, stmt.var), state.get(Keys.local(stmt.src)))
+			break;
+		case 'assign':
+			state.put(Keys.local(stmt.dst), state.get(Keys.local(stmt.src)))
+			break;
+		case 'load':
+			var objType = state.get(Keys.local(stmt.object))
+			objType = abstractToObject(objType)
+			var prtyNameV = resolvePrty(stmt.prty)
+			var v;
+			if (prtyNameV.type === 'value' && typeof prtyNameV.value === 'string') {
+				var name = prtyNameV.value
+				switch (objType.type) {
+					case 'value':
+						var objKey = objType.value.key
+						v = state.get(Keys.prty(objKey,name))
+						if (!v && objKey < heap.snapshot.length) {
+							var obj = lookupObject(objKey)
+							var prty = obj.propertyMap.get(name)
+							if ('value' in prty) {
+								v = {type: 'value', value: prty.value}
+							}
+						}
+						break;
+					case 'object':
+						var prty = objType.properties[name]
+						if (prty) {
+							v = prty.type
+						}
+						break;
+				}
+			} else {
+				// TODO: lookup of unknown property (use indexers)
+			}
+			if (!v) {
+				v = {type: 'any'}
+			}
+			state.put(Keys.local(stmt.dst), {type: 'any'})
+			break;
+		case 'store':
+			var objType = state.get(Keys.local(stmt.object))
+			objType = abstractToObject(objType)
+			var prtyNameV = resolvePrty(stmt.prty)
+			var v = state.get(Keys.local(stmt.src))
+			if (prtyNameV.type === 'value' && typeof prtyNameV.value === 'string') {
+				var name = prtyNameV.value
+				switch (objType.type) {
+					case 'value':
+						var objKey = objType.value.key
+						state.put(Keys.prty(objKey,name), v)
+						break;
+					case 'object':
+						// TODO: check type of v vs object type?
+						break;
+				}
+			}
+			break;
+		case 'const':
+			state.put(Keys.local(stmt.dst), {type: 'value', value: stmt.value})
+			break;
+		case 'create-object':
+			// ignore termination issues for now
+			var id = state.nextHeapLocation()
+			stmt.properties.forEach(function(prty) {
+				if (prty.type === 'value') {
+					state.put(Keys.prty(id,prty.name), state.get(Keys.local(prty.value)))
+				}
+			})
+			state.put(Keys.local(stmt.dst), {type: 'value', value: {key: id}})
+			break;
+		case 'create-array':
+		case 'create-function':
+		case 'call-method':
+		case 'call-function':
+		case 'call-constructor':
+		case 'unary':
+		case 'binary':
+	}
+}
 
-
-function bestCommonType(types) {
-	return {type:'any'} // todo
+function abstractToObject(v) {
+	switch (v.type) {
+		case 'value':
+			return {type: 'value', value: coerceToObject(v.value)}
+		case 'object':
+			return v
+		case 'reference':
+			return lookupQType(v.name, v.typeArguments)
+		case 'number':
+			return {type: 'value', value: NumberPrototype}
+		case 'string':
+			return {type: 'value', value: StringPrototype}
+		case 'boolean':
+			return {type: 'value', value: BooleanPrototype}
+		default:
+			return v
+	}
 }
 
 function abstractType(x) {
