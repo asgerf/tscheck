@@ -105,6 +105,9 @@ function lookupQType(qname, targs) {
 	}
 	return substType(tdecl.object, tenv)
 }
+function resolveTypeRef(t) {
+	return lookupQType(t.name, t.typeArguments)
+}
 
 function getPrototype(key) {
 	var obj = lookupObject(key)
@@ -985,6 +988,28 @@ function getFunction(id) {
 	return cfg.functions[id]
 }
 
+function numberStatements(cfg) {
+	var next_id = 1
+	cfg.$id2create_function = []
+	cfg.forEach(function(f) {
+		f.$id = next_id++
+		if (!f.blocks)
+			return
+		f.blocks.forEach(function(b) {
+			b.$id = next_id++
+			b.statements.forEach(function(stmt) {
+				stmt.$id = next_id++
+				if (stmt.type === 'create-function') {
+					stmt.$id2create_function[stmt.$id] = stmt.function
+				}
+			})
+		})
+	})
+}
+if (cfg) {
+	numberStatements(cfg)
+}
+
 var Keys = {
 	this: 0,
 	this_function: 1,
@@ -1013,8 +1038,8 @@ AbstractState.prototype.get = function(key) {
 AbstractState.prototype.put = function(key, value) {
 	this[key] = value
 }
-AbstractState.prototype.nextHeapLocation = function() {
-	return snapshot.heap.length + this.heap_counter++;
+AbstractState.prototype.getHeapLocation = function(id) {
+	return snapshot.heap.length + id;
 }
 AbstractState.prototype.clone = function() {
 	var result = new AbstractState
@@ -1026,6 +1051,13 @@ AbstractState.prototype.clone = function() {
 	return result
 }
 
+function substituteParameterType(t) {
+	if (t.type === 'string-const') {
+		return {type: 'value', value: t.value}
+	} else {
+		return t
+	}
+}
 
 function checkCallSignature(call, receiverKey, functionKey, path) {
 	var functionObj = lookupObject(functionKey)
@@ -1046,15 +1078,22 @@ function checkCallSignature(call, receiverKey, functionKey, path) {
 			state.put(Keys.arguments_array, {type: 'any'}) // TODO: model arguments array?
 			for (var i=0; i<fun.num_parameters; i++) {
 				var t = i < call.parameters.length ? call.parameters[i].type : {type: 'value', value: undefined}
-				state.put(Keys.parameter(i), t)
+				state.put(Keys.parameter(i), substituteParameterType(t))
 			}
-			var envKey = state.nextHeapLocation()
+			var envKey = state.getHeapLocation(fun.$id)
 			cfg.variables.forEach(function(varName) {
 				state.put(Keys.prty(envKey, varName), {type: 'value', value: undefined})
 			})
 			state.put(Keys.env(envKey), {type: 'value', value: functionObj.env})
 			state.put(Keys.current_env, {type: 'value', value: {key: envKey}})
-			var outputState = analyzeFunction(f,state)
+			var outputStates = analyzeFunction(f,state)
+			// check that there exists an output state satisfying return type
+			var hasOkState = outputStates.some(function(state) {
+
+			})
+			if (!hasOkState) {
+				console.log(path + ": function does not satisfy " + formatTypeCall(call))
+			}
 			break;
 		case 'bind':
 			break; // TODO: check bound functions
@@ -1065,16 +1104,70 @@ function checkCallSignature(call, receiverKey, functionKey, path) {
 }
 
 function analyzeFunction(f, initialState) { // returns new state
-	var block2state = [initialState]
-	var worklist = [0]
+	var results = []
+	var visitedStates = Object.create(null)
+	var worklist = [{block:0, state:initialState}]
+	function hashValue(v) {
+		return canonicalizeType(v)
+	}
+	function hash(blockidx, state) {
+		var live = f.blocks[blockidx].$liveBefore
+		var bag = []
+		for (var k in state) {
+			if (!state.hasOwnProperty(k))
+				continue
+			if (isNumberString(k) && !live[k]) // discard non-live locals
+				continue
+			bag.push(k + ":" + hashValue(state[v]))
+		}
+		bag.sort()
+		return blockidx + '=' + bag.join('+')
+	}
+	var CLONE_PLEASE = true
+	function propagateStateTo(blockidx, state, shouldClone) {
+		var h = hash(blockidx, state)
+		if (visitedStates[h])
+			return
+		visitedStates[h] = true
+		if (shouldClone) {
+			state = state.clone()
+		}
+		worklist.push({block: blockidx, state: state})
+	}
 	while (worklist.length > 0) {
-		var blockidx = worklist.pop()
-		var block = f.blocks[blockidx]
-		var state = block2state[blockidx].clone()
+		var workitem = worklist.pop()
+		var block = f.blocks[workitem.block]
+		var state = workitem.state
 		for (var i=0; i<block.statements.length; ++i) {
-			analyzeStmt(block.statements[i], state)
+			var r = analyzeStmt(block.statements[i], state)
+			if (!r)
+				break;
+		}
+		// TODO: strip non-live variables here for speed?
+		switch (block.jump.type) {
+			case 'goto':
+				propagateStateTo(block.jump.target, state)
+				break;
+			case 'if':
+				var b = abstractToBoolean(state.get(Keys.local(block.jump.condition)))
+				if (b.type === 'value' && b.value === true) {
+					propagateStateTo(block.jump.then, state)
+				} else if (b.type === 'value' && b.value === false) {
+					propagateStateTo(block.jump.else, state)
+				} else {
+					propagateStateTo(block.jump.then, state)
+					propagateStateTo(block.jump.else, state, CLONE_PLEASE)
+				}
+				break;
+			case 'return':
+				var v = block.jump.value === null ? {type: 'value', value: undefined} : state.get(Keys.local(block.jump.value))
+				results.push(v)
+				break;
+			case 'throw':
+				break; // no action necessary
 		}
 	}
+	return results
 }
 function analyzeStmt(stmt, state) { // mutates state
 	function lookupVariable(varName) {
@@ -1131,7 +1224,7 @@ function analyzeStmt(stmt, state) { // mutates state
 						v = state.get(Keys.prty(objKey,name))
 						if (!v && objKey < heap.snapshot.length) {
 							var obj = lookupObject(objKey)
-							var prty = obj.propertyMap.get(name)
+							var prty = obj.propertyMap.get(name) // TODO: invoke getter?
 							if ('value' in prty) {
 								v = {type: 'value', value: prty.value}
 							}
@@ -1140,7 +1233,7 @@ function analyzeStmt(stmt, state) { // mutates state
 					case 'object':
 						var prty = objType.properties[name]
 						if (prty) {
-							v = prty.type
+							v = prty.type 
 						}
 						break;
 				}
@@ -1162,7 +1255,7 @@ function analyzeStmt(stmt, state) { // mutates state
 				switch (objType.type) {
 					case 'value':
 						var objKey = objType.value.key
-						state.put(Keys.prty(objKey,name), v)
+						state.put(Keys.prty(objKey,name), v) // TODO: invoke setter?
 						break;
 					case 'object':
 						// TODO: check type of v vs object type?
@@ -1174,22 +1267,90 @@ function analyzeStmt(stmt, state) { // mutates state
 			state.put(Keys.local(stmt.dst), {type: 'value', value: stmt.value})
 			break;
 		case 'create-object':
-			// ignore termination issues for now
-			var id = state.nextHeapLocation()
+			// ignore strong update issues for now
+			var id = state.getHeapLocation(stmt.$id)
 			stmt.properties.forEach(function(prty) {
 				if (prty.type === 'value') {
 					state.put(Keys.prty(id,prty.name), state.get(Keys.local(prty.value)))
-				}
+				} // TODO: store getter/setter?
 			})
 			state.put(Keys.local(stmt.dst), {type: 'value', value: {key: id}})
 			break;
 		case 'create-array':
+			// TODO: better modeling of arrays
+			state.put(Keys.local(stmt.dst), {type: 'reference', name: 'Array', typeArguments: {type: 'any'}})
+			break;
 		case 'create-function':
-		case 'call-method':
+			var id = state.getHeapLocation(stmt.$id)
+			state.put(Keys.env(v), {type: 'value', value: state.get(Keys.current_env)})
+			state.put(Keys.local(stmt.dst), {type: 'value', value: {key: id}})
+			break;
+		case 'call-method': // TODO: implement rest
+			state.put(Keys.local(stmt.dst), {type: 'any'})
+			break;
 		case 'call-function':
+			state.put(Keys.local(stmt.dst), {type: 'any'})
+			break;
 		case 'call-constructor':
+			state.put(Keys.local(stmt.dst), {type: 'any'})
+			break;
 		case 'unary':
+			state.put(Keys.local(stmt.dst), {type: 'any'})
+			break;
 		case 'binary':
+			state.put(Keys.local(stmt.dst), {type: 'any'})
+			break;
+	}
+	return true // completes normally
+}
+
+function isSubtypeOf(state, x, y) {
+	var assumptions = Object.create(null)
+	function visit(x,y) {
+		if (x.type === 'value' && x.value === null)
+			return true // null satisfies all types
+		switch (y.type) {
+			case 'value':
+				return x.type === 'value' && valuesStrictEq(x.value, y.value)
+			case 'reference':
+				var h = canonicalizeType(x) + '~' + canonicalizeType(y)
+				if (h in assumptions)
+					return assumptions[h]
+				assumptions[h] = true
+				return assumptions[h] = visit(x, resolveTypeRef(y))
+			case 'object':
+				x = abstractToObject(x)
+				if (x.type === 'value') {
+					if (typeof x.value !== 'object')
+						return false
+					var xkey = x.value.key
+					for (var k in y.properties) {
+						var yprty = y.properties[k]
+						var xprty = state.get(Keys.prty(xkey, k))
+						if (xprty) {
+							
+						}
+					}
+					return ???
+				} else if (x.type === 'object') {
+					return ???
+				} else {
+					return false
+				}
+
+		}
+	}
+	return visit(x,y)
+}
+
+function abstractToBoolean(v) {
+	switch (v.type) {
+		case 'value':
+			return {type: 'value', value: !!v.value}
+		case 'void':
+			return {type: 'value', value: false}
+		default:
+			return {type: 'boolean'}
 	}
 }
 
