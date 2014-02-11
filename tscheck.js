@@ -1313,8 +1313,8 @@ function inferTypesInFunction(fun) {
 			unifier.unify(x, getNode(arguments[i]))
 		}
 	}
-	var PRIMITIVE = true
-	var NOT_PRIMITIVE = false
+	var NULL = true
+	var NOT_NULL = false
 	var VOID = true // result is not used or is coerced to a boolean before being used
 	var NOT_VOID = false
 	function getVar(id) {
@@ -1424,7 +1424,7 @@ function inferTypesInFunction(fun) {
 					unify(getVar(d.id.name), d.id)
 					if (d.init) {
 						var p = visitExp(d.init, NOT_VOID)
-						if (p === NOT_PRIMITIVE) {
+						if (p === NOT_NULL) {
 							unify(d.id, d.init)
 						}
 					}
@@ -1445,7 +1445,7 @@ function inferTypesInFunction(fun) {
 					unifyPrty(node, String(i), elm)
 				})
 				addPrototype(node, lookupPath("Array.prototype").key)
-				break;
+				return NOT_NULL
 			case 'ObjectExpression':
 				node.properties.forEach(function(p) {
 					visitExp(p.value, NOT_VOID)
@@ -1464,19 +1464,74 @@ function inferTypesInFunction(fun) {
 							break;
 					}
 				})
+				addPrototype(node, lookupPath("Object.prototype").key)
+				return NOT_NULL
 			case 'FunctionExpression':
+				// TODO: track functions
+				return NOT_NULL
 			case 'SequenceExpression':
+				for (var i=0; i<node.expressions.length-1; ++i) {
+					visitExpVoid(node.expressions[i])
+				}
+				unify(node, node.expressions.last())
+				return visitExp(node.expressions.last(), void_ctx)
 			case 'UnaryExpression':
+				return NOT_NULL; // TODO: compute type
 			case 'BinaryExpression':
+				return NOT_NULL // TODO: compute type
 			case 'AssignmentExpression':
+				if (node.operator === '=') {
+					visitExp(node.left, NOT_VOID)
+					var r = visitExp(node.right, NOT_VOID)
+					if (r !== NULL) {
+						unify(node, node.left, node.right)
+					}
+					return 
+				} else {
+					// TODO: compute type
+					visitExp(node.left, NOT_VOID)
+					visitExp(node.right, NOT_VOID)
+					return NULL
+				}
 			case 'UpdateExpression':
+				visitExp(node.argument, NOT_VOID)
+				return NULL;
 			case 'LogicalExpression':
+				if (node.operator === '&&') {
+					unify(node, node.right)
+					visitExp(node.left, VOID)
+					visitExp(node.right, void_ctx)
+					return NOT_NULL
+				} else {
+					if (!void_ctx) {
+						unify(node, node.left, node.right)
+					}
+					visitExp(node.left, void_ctx)
+					visitExp(node.right, void_ctx)
+					return NOT_NULL
+				}
 			case 'ConditionalExpression':
+				visitExp(node.test, VOID)
+				visitExp(node.consequent, void_ctx)
+				visitExp(node.alternate, void_ctx)
+				if (!void_ctx) {
+					unify(node, node.consequent, node.alternate)
+				}
+				return NOT_NULL
 			case 'NewExpression':
 			case 'CallExpression':
 			case 'MemberExpression':
 			case 'Identifier':
+				if (node.name === 'undefined') {
+					assumeType(node, {type: 'value', value: undefined})
+					return NULL
+				}
+				// TODO: variable in environment???
+				unify(getVar(node.name), node)
+				return NOT_NULL
 			case 'Literal':
+				assumeType(node, {type: 'value', value: node.value})
+				return node.value === null ? NULL : NOT_NULL
 		}
 	}
 	// ..
