@@ -461,22 +461,9 @@ function coerceTypeToObject(x) {
 		case 'string': return {type: 'reference', name:'String'}
 		case 'string-const': return {type: 'reference', name:'String'}
 		case 'boolean': return {type: 'reference', name:'Boolean'}
-		case 'value':
-			if (x.value && typeof x.value === 'object') {
-				var obj = lookupObject(x.value.key)
-				var t = {type: 'object', properties: {}, calls: [], stringIndexer: null, numberIndexer: null}
-				obj.propertyMap.forEach(function(prty) {
-					t.properties[prty.name] = {
-						optional: false,
-						type: { type: 'value', value: prty.value }
-					}
-				})
-				return t
-			}
 		default: return x
 	}
 }
-
 
 // ------------------------------------------------------------
 // 		 Recursive check of Value vs Type
@@ -978,77 +965,324 @@ function formatValue(value, depth) {
 }
 
 
-// --------------------------
-// 		Static Analysis
-// --------------------------
+// ----------------------
+// 		UNION TYPES
+// ----------------------
 
-var cfg = sourceFileAst && jsctrl(sourceFileAst)
-
-function getFunction(id) {
-	return cfg.functions[id]
+function UnionType() {
+	this.any = false
+	this.table = Object.create(null)
+}
+UnionType.prototype.add = function(t) {
+	if (this.any)
+		return false
+	if (t.type === 'any') {
+		this.any = true
+		this.table = null
+		return true
+	}
+	var h = canonicalizeType(t)
+	if (h in this.table)
+		return false
+	this.table[h] = t
+	return true
+}
+UnionType.prototype.consume = function(ut) {
+	if (this.any)
+		return
+	if (ut.any) {
+		this.any = true
+		this.table = null
+		return
+	}
+	for (var k in ut.table) {
+		this.table[k] = ut.table[k]
+	}
+}
+UnionType.prototype.some = function(f) {
+	if (this.any)
+		return f({type: 'any'})
+	var table = this.table
+	for (var k in table) {
+		if (f(table[k])) {
+			return true
+		}
+	}
+	return false
+}
+UnionType.prototype.forEach = function(f) {
+	if (this.any) {
+		f({type: 'any'})
+		return
+	}
+	var table = this.table
+	for (var k in table) {
+		f(table[k])
+	}
 }
 
-function numberStatements(cfg) {
-	var next_id = 1
-	cfg.$id2create_function = []
-	cfg.forEach(function(f) {
-		f.$id = next_id++
-		if (!f.blocks)
-			return
-		f.blocks.forEach(function(b) {
-			b.$id = next_id++
-			b.statements.forEach(function(stmt) {
-				stmt.$id = next_id++
-				if (stmt.type === 'create-function') {
-					stmt.$id2create_function[stmt.$id] = stmt.function
-				}
+// ----------------------
+// 		UNION-FIND
+// ----------------------
+
+function UNode() {
+	this.parent = this
+	this.rank = 0
+	this.properties = new Map
+	this.type = new UnionType
+	this.prototypes = Object.create(null)
+}
+UNode.prototype.rep = function() {
+	var p = this.parent
+	if (p === this)
+		return p
+	return this.parent = p.rep()
+};
+
+
+function Unifier() {
+	this.queue = []
+}
+Unifier.prototype.unify = function(n1, n2) {
+	n1 = n1.rep()
+	n2 = n2.rep()
+	if (n1 === n2)
+		return
+	if (n2.rank > n1.rank) {
+		var z = n1; n1 = n2; n2 = z; // swap n1/n2 so n1 has the highest rank
+	}
+	if (n1.rank > n2.rank) {
+		n1.rank++
+	}
+	n2.parent = n1
+	for (var k in n2.properties) {
+		if (k[0] !== '$')
+			continue
+		var p2 = n2.properties[k]
+		if (k in n1.properties) {
+			var p1 = n1.properties[k]
+			this.unifyLater(p1, p2)
+		} else {
+			n1.properties[k] = p2
+		}
+	}
+	for (var k in n2.prototypes) {
+		n1.prototypes[k] = true
+	}
+	n1.type.consume(n2.type)
+	n2.properties = null
+	n2.type = null
+	n2.prototypes = null
+};
+Unifier.prototype.unifyPrty = function(n1, prty, n2) {
+	n1 = n1.rep()
+	n2 = n2.rep()
+	var k = '$' + prty
+	var p1 = n1.properties[k]
+	if (p1) {
+		this.unifyLater(p1, n2)
+	} else {
+		n1.properties[k] = n2
+	}
+};
+
+Unifier.prototype.unifyLater = function(n1, n2) {
+	if (n1 !== n2) {
+		this.queue.push(n1)
+		this.queue.push(n2)
+	}
+}
+
+Unifier.prototype.complete = function() {
+	while (this.queue.length > 0) {
+		var n1 = this.queue.pop()
+		var n2 = this.queue.pop()
+		this.unify(n1, n2)
+	}
+}
+
+// -----------------------------
+// 		 TYPE PROPAGATION
+// -----------------------------
+
+// Finds strongly connected components in the points-to graph
+//
+// Adds the following fields to union-find root nodes:
+// - $scc: pointer to representative of SCC
+// - $components (repr of SCC only): list of members in SCC
+//
+// Returns the list of representative nodes, topologically sorted
+function computeSCCs() {  // see: http://en.wikipedia.org/wiki/Tarjan's_strongly_connected_components_algorithm
+	var components = []
+	var index = 0
+	var stack = []
+	for (var i=0; i<unifyNodes.length; i++) {
+		var node = unifyNodes[i]
+		if (node.rep() === node) {
+			if (typeof node.$index !== 'number') {
+				scc(node)
+			}
+		}
+	}
+	function scc(v) {
+		v.$index = index
+		v.$lowlink = index
+		index++
+		stack.push(v)
+
+		for (var k in v.properties) {
+			if (k[0] !== '$')
+				continue
+			var w = v.properties[k].rep()
+			if (typeof w.$index !== 'number') {
+				scc(w)
+				v.$lowlink = Math.min(v.$lowlink, w.$lowlink)
+			} else if (w.$onstack) {
+				v.$lowlink = Math.min(v.$lowlink, w.$index)
+			}
+		}
+
+		if (v.$lowlink === v.$index) {
+			components.push(v)
+			var cmp = v.$component = []
+			var w;
+			do {
+				w = stack.pop()
+				cmp.push(w)
+				w.$scc = v
+			} while (w !== v);
+		}
+	}
+	components.reverse() // reversing this makes it topologically sorted
+	return components
+}
+
+function propagateTypes() {
+	var components = computeSCCs()
+	components.forEach(function(c) {
+		// propagate round inside component
+		var worklist = []
+		function enqueue(node) {
+			if (!node.$in_worklist) {
+				worklist.push(node)
+				node.$in_worklist = true
+			}
+		}
+		c.$component.forEach(enqueue)
+		while (worklist.length > 0) {
+			var node = worklist.pop()
+			node.$in_worklist = false
+			node.properties.forEach(function(prty, dst) {
+				dst = dst.rep()
+				if (dst.$scc !== c)
+					return
+				node.type.forEach(function(t) {
+					lookupOnType(t,prty).forEach(function (t2) {
+						if (dst.type.add(t2)) {
+							enqueue(dst)
+						}
+					})
+				})
+			})
+		}
+		// propagate outward to successors
+		c.$component.forEach(function(node) {
+			node.properties.forEach(function(prty, dst) {
+				dst = dst.rep()
+				if (dst.$scc === c)
+					return
+				node.type.forEach(function(t) {
+					lookupOnType(t,prty).forEach(function(t2) {
+						dst.type.add(t2)
+					})
+				})
 			})
 		})
 	})
 }
-if (cfg) {
-	numberStatements(cfg)
+
+function lookupOnType(t, name) { // type X string -> type[]
+	t = coerceTypeToObject(t)
+	if (t.type === 'reference')
+		t = resolveTypeRef(t)
+	switch (t.type) {
+		case 'any': 
+			return [{type:'any'}]
+		case 'object':
+			var prty = t.properties[name]
+			if (prty) {
+				return [prty.type]
+			}
+			if (t.numberIndexer !== null && isNumberString(name)) {
+				return [t.numberIndexer]
+			}
+			if (t.stringIndexer !== null) {
+				return [t.stringIndexer]
+			}
+			return []
+		case 'enum':
+			var enumvals = enum_values.get(t.name)
+			if (enumvals.length === 0)
+				return [{type: 'any'}]
+			var keys = enumvals.map(function(v) {
+				v = coerceToObject(v)
+				if (v && typeof v === 'object')
+					return v.key
+				else
+					return null // removed by compact below
+			}).compact().unique()
+			var values = keys.map(function(key) {
+				var obj = lookupObject(key)
+				var prty = obj.propertyMap.get(name)
+				if (prty) {
+					return {type: 'value', value: prty.value}
+				} else {
+					return null // removed by compact below
+				}
+			}).compact()
+			return values
+		case 'value':
+			var v = coerceToObject(t.value)
+			if (v.value && typeof v.value === 'object') {
+				var obj = lookupObject(t.value.key)
+				var prty = obj.propertyMap.get(name)
+				if (prty) {
+					return [{type: 'value', value: prty.value}]
+				}
+			}
+			return []
+		default:
+			return []
+	}
 }
 
-var Keys = {
-	this: 0,
-	this_function: 1,
-	arguments_array: 2,
-	current_env: '!env',
-	parameter: function(index) {
-		return index + 3
-	}
-	local: function(id) {
-		return id
-	},
-	prty: function(object,name) {
-		return object + '.' + name
-	},
-	env: function(object) {
-		return object + '!env'
-	}
-}
+// --------------------------
+// 		Static Analysis
+// --------------------------
 
-function AbstractState() {
-	this.heap_counter = 0;
-}
-AbstractState.prototype.get = function(key) {
-	return this[key]
-}
-AbstractState.prototype.put = function(key, value) {
-	this[key] = value
-}
-AbstractState.prototype.getHeapLocation = function(id) {
-	return snapshot.heap.length + id;
-}
-AbstractState.prototype.clone = function() {
-	var result = new AbstractState
-	for (var k in this) {
-		if (this.hasOwnProperty(k)) {
-			result[k] = this[k]
+function numberFunctions(ast) {
+	var functions = []
+	function visit(node) {
+		if (node.type === 'FunctionExpression' || node.type === 'FunctionDeclaration' || node.type === 'Program') {
+			node.$function_id = functions.length
+			functions.push(node)
 		}
+		children(node).forEach(visit)
 	}
-	return result
+	visit(ast)
+	ast.$id2function = functions
+}
+
+function getFunction(id) {
+	return ast && ast.$id2function[id]
+}
+
+function prepareAST(ast) {
+	numberFunctions(ast)
+}
+
+if (sourceFileAst) {
+	prepareAST(sourceFileAst)
 }
 
 function substituteParameterType(t) {
@@ -1057,6 +1291,196 @@ function substituteParameterType(t) {
 	} else {
 		return t
 	}
+}
+
+function inferTypesInFunction(fun) {
+	var unifier = fun.$unifier = new Unifier
+	function getNode(x) {
+		if (x instanceof UNode)
+			return x
+		if (x.$node)
+			return x.$node.rep()
+		return x.$node = new UNode
+	}
+	function getEnv(fun) {
+		if (fun.$env_node)
+			return fun.$env_node.rep()
+		return fun.$env_node = new UNode
+	}
+	function unify(x) {
+		x = getNode(x)
+		for (var i=1; i<arguments.length; ++i) {
+			unifier.unify(x, getNode(arguments[i]))
+		}
+	}
+	var PRIMITIVE = true
+	var NOT_PRIMITIVE = false
+	var VOID = true // result is not used or is coerced to a boolean before being used
+	var NOT_VOID = false
+	function getVar(id) {
+
+	}
+	function assumeAnyType(e) {
+		unifier.satisfyType(e, {type: 'any'})
+	}
+	function assumeType(e, t) {
+		unifier.satisfyType(e, t)
+	}
+	function visitStmt(node) {
+		switch (node.type) {
+			case 'EmptyStatement':
+				break;
+			case 'BlockStatement':
+				node.statements.forEach(visitStmt)
+				break;
+			case 'ExpressionStatement':
+				visitExpVoid(node.expression)
+				break;
+			case 'IfStatement':
+				visitExpVoid(node.condition)
+				break;
+			case 'LabeledStatement':
+				visitStmt(node.body)
+				break;
+			case 'BreakStatement':
+				break;
+			case 'ContinueStatement':
+				break;
+			case 'WithStatement':
+				visitExp(node.object, NOT_VOID)
+				visitStmt(node.body) // TODO: flag use of `with` and don't report errors from this function
+				break;
+			case 'SwitchStatement':
+				visitExp(node.discriminant, NOT_VOID)
+				node.cases.forEach(function(c) {
+					if (c.test) {
+						visitExpVoid(c.text, NOT_VOID)
+					}
+					c.consequent.forEach(visitStmt)
+				})
+				break;
+			case 'ReturnStatement':
+				if (node.argument) {
+					visitExp(node.argument, NOT_VOID)
+					unify(getVar("@return"), node.argument)
+				}
+				break;
+			case 'ThrowStatement':
+				visitExpVoid(node.argument)
+				break;
+			case 'TryStatement':
+				visitStmt(node.block)
+				if (node.handler) {
+					assumeAnyType(node.handler.param)
+					visitStmt(node.handler.body)
+				}
+				if (node.finalizer) {
+					visitStmt(node.finalizer)
+				}
+				break;
+			case 'WhileStatement':
+				visitExpVoid(node.test)
+				visitStmt(node.body)
+				break;
+			case 'DoWhileStatement':
+				visitStmt(node.body)
+				visitExpVoid(node.test)
+				break;
+			case 'ForStatement':
+				if (node.init) {
+					if (node.init.type === 'VariableDeclaration') {
+						visitStmt(node.init)
+					} else {
+						visitExpVoid(node.init)
+					}
+				}
+				if (node.test) {
+					visitExpVoid(node.test)
+				}
+				if (node.update) {
+					visitExpVoid(node.update)
+				}
+				visitExp(node.body)
+				break;
+			case 'ForInStatement':
+				var lv;
+				if (node.left.type === 'VariableDeclaration') {
+					visitStmt(node.left)
+					lv = node.left.declarations[0].id
+				} else {
+					visitExpVoid(node.left)
+					lv = node.left
+				}
+				assumeType(lv, {type: 'string'})
+				visitStmt(node.body)
+				break;
+			case 'DebuggerStatement':
+				break;
+			case 'FunctionDeclaration':
+				// TODO: track functions
+				break;
+			case 'VariableDeclaration':
+				node.declarations.forEach(function(d) {
+					unify(getVar(d.id.name), d.id)
+					if (d.init) {
+						var p = visitExp(d.init, NOT_VOID)
+						if (p === NOT_PRIMITIVE) {
+							unify(d.id, d.init)
+						}
+					}
+				})
+				break;
+		}
+	}
+	function visitExpVoid(node) {
+		return visitExp(node, VOID)
+	}
+	function visitExp(node, void_ctx) {
+		switch (node.type) {
+			case 'ArrayExpression':
+				node.elements.forEach(function(elm, i) {
+					if (!elm)
+						return
+					visitExp(elm, NOT_VOID)
+					unifyPrty(node, String(i), elm)
+				})
+				addPrototype(node, lookupPath("Array.prototype").key)
+				break;
+			case 'ObjectExpression':
+				node.properties.forEach(function(p) {
+					visitExp(p.value, NOT_VOID)
+					var name = p.key.type === 'Literal' ? String(p.key.value) : p.key.name
+					switch (p.kind) {
+						case 'init':
+							unifyPrty(node, name, p.value)
+							break;
+						case 'get':
+							unifyPrty(node, name, )
+							break;
+						case 'set:'
+							if (p.value.params.length >= 1) {
+								unifyPrty(node, name, p.value.params[0])
+							}
+							break;
+					}
+				})
+			case 'FunctionExpression':
+			case 'SequenceExpression':
+			case 'UnaryExpression':
+			case 'BinaryExpression':
+			case 'AssignmentExpression':
+			case 'UpdateExpression':
+			case 'LogicalExpression':
+			case 'ConditionalExpression':
+			case 'NewExpression':
+			case 'CallExpression':
+			case 'MemberExpression':
+			case 'Identifier':
+			case 'Literal':
+		}
+	}
+	// ..
+	unifier.complete()
 }
 
 function checkCallSignature(call, receiverKey, functionKey, path) {
@@ -1070,600 +1494,18 @@ function checkCallSignature(call, receiverKey, functionKey, path) {
 	switch (functionObj.function.type) {
 		case 'user':
 			var fun = getFunction(functionObj.function.id)
-			if (!fun.blocks)
-				return // function uses unsupported feature
-			var state = new AbstractState
-			state.put(Keys.this, {type: 'value', value: {key: receiverKey}})
-			state.put(Keys.this_function, {type: 'value', value: {key: functionKey}})
-			state.put(Keys.arguments_array, {type: 'any'}) // TODO: model arguments array?
-			for (var i=0; i<fun.num_parameters; i++) {
-				var t = i < call.parameters.length ? call.parameters[i].type : {type: 'value', value: undefined}
-				state.put(Keys.parameter(i), substituteParameterType(t))
+			if (!fun)
+				return
+			if (!fun.$unifier) {
+				inferTypesInFunction(fun)
 			}
-			var envKey = state.getHeapLocation(fun.$id)
-			cfg.variables.forEach(function(varName) {
-				state.put(Keys.prty(envKey, varName), {type: 'value', value: undefined})
-			})
-			state.put(Keys.env(envKey), {type: 'value', value: functionObj.env})
-			state.put(Keys.current_env, {type: 'value', value: {key: envKey}})
-			var outputStates = analyzeFunction(f,state)
-			// check that there exists an output state satisfying return type
-			var hasOkState = outputStates.some(function(state) {
 
-			})
-			if (!hasOkState) {
-				console.log(path + ": function does not satisfy " + formatTypeCall(call))
-			}
 			break;
 		case 'bind':
 			break; // TODO: check bound functions
 		case 'native':
 		case 'unknown':
 			break;
-	}
-}
-
-function analyzeFunction(f, initialState) { // returns new state
-	var results = []
-	var visitedStates = Object.create(null)
-	var worklist = [{block:0, state:initialState}]
-	function hashValue(v) {
-		return canonicalizeType(v)
-	}
-	function hash(blockidx, state) {
-		var live = f.blocks[blockidx].$liveBefore
-		var bag = []
-		for (var k in state) {
-			if (!state.hasOwnProperty(k))
-				continue
-			if (isNumberString(k) && !live[k]) // discard non-live locals
-				continue
-			bag.push(k + ":" + hashValue(state[v]))
-		}
-		bag.sort()
-		return blockidx + '=' + bag.join('+')
-	}
-	var CLONE_PLEASE = true
-	function propagateStateTo(blockidx, state, shouldClone) {
-		var h = hash(blockidx, state)
-		if (visitedStates[h])
-			return
-		visitedStates[h] = true
-		if (shouldClone) {
-			state = state.clone()
-		}
-		worklist.push({block: blockidx, state: state})
-	}
-	while (worklist.length > 0) {
-		var workitem = worklist.pop()
-		var block = f.blocks[workitem.block]
-		var state = workitem.state
-		for (var i=0; i<block.statements.length; ++i) {
-			var r = analyzeStmt(block.statements[i], state)
-			if (!r)
-				break;
-		}
-		// TODO: strip non-live variables here for speed?
-		switch (block.jump.type) {
-			case 'goto':
-				propagateStateTo(block.jump.target, state)
-				break;
-			case 'if':
-				var b = abstractToBoolean(state.get(Keys.local(block.jump.condition)))
-				if (b.type === 'value' && b.value === true) {
-					propagateStateTo(block.jump.then, state)
-				} else if (b.type === 'value' && b.value === false) {
-					propagateStateTo(block.jump.else, state)
-				} else {
-					propagateStateTo(block.jump.then, state)
-					propagateStateTo(block.jump.else, state, CLONE_PLEASE)
-				}
-				break;
-			case 'return':
-				var v = block.jump.value === null ? {type: 'value', value: undefined} : state.get(Keys.local(block.jump.value))
-				results.push(v)
-				break;
-			case 'throw':
-				break; // no action necessary
-		}
-	}
-	return results
-}
-function analyzeStmt(stmt, state) { // mutates state
-	function lookupVariable(varName) {
-		var env = state.get(Keys.current_env).key
-		while (true) {
-			var value = state.get(Keys.prty(env,varName))
-			if (value) {
-				return {env:env, value:value}
-			}
-			if (env < snapshot.heap.length) {
-				var heapEnv = lookupObject(env)
-				var prty = heapEnv.propertyMap.get(varName)
-				if (prty) {
-					return {env:env, value:{type:'value', value:prty.value}}
-				}
-				if (heapEnv.env) {
-					env = heapEnv.env.key
-				} else {
-					return env // reached global object
-				}
-			} else {
-				env = state.get(Keys.env(env)).key
-			}
-		}
-	}
-	function resolvePrty(prty) {
-		if (typeof prty === 'string')
-			return {type: 'value', value: string}
-		var v = state.get(Keys.local(prty))
-		return abstractToString(v)
-	}
-	switch (stmt.type) {
-		case 'read-var':
-			var v = lookupVariable(stmt.var)
-			state.put(Keys.local(stmt.dst), v.value)
-			break;
-		case 'write-var':
-			var v = lookupVariable(stmt.var)
-			state.put(Keys.prty(v.env, stmt.var), state.get(Keys.local(stmt.src)))
-			break;
-		case 'assign':
-			state.put(Keys.local(stmt.dst), state.get(Keys.local(stmt.src)))
-			break;
-		case 'load':
-			var objType = state.get(Keys.local(stmt.object))
-			objType = abstractToObject(objType)
-			var prtyNameV = resolvePrty(stmt.prty)
-			var v;
-			if (prtyNameV.type === 'value' && typeof prtyNameV.value === 'string') {
-				var name = prtyNameV.value
-				switch (objType.type) {
-					case 'value':
-						var objKey = objType.value.key
-						v = state.get(Keys.prty(objKey,name))
-						if (!v && objKey < heap.snapshot.length) {
-							var obj = lookupObject(objKey)
-							var prty = obj.propertyMap.get(name) // TODO: invoke getter?
-							if ('value' in prty) {
-								v = {type: 'value', value: prty.value}
-							}
-						}
-						break;
-					case 'object':
-						var prty = objType.properties[name]
-						if (prty) {
-							v = prty.type 
-						}
-						break;
-				}
-			} else {
-				// TODO: lookup of unknown property (use indexers)
-			}
-			if (!v) {
-				v = {type: 'any'}
-			}
-			state.put(Keys.local(stmt.dst), {type: 'any'})
-			break;
-		case 'store':
-			var objType = state.get(Keys.local(stmt.object))
-			objType = abstractToObject(objType)
-			var prtyNameV = resolvePrty(stmt.prty)
-			var v = state.get(Keys.local(stmt.src))
-			if (prtyNameV.type === 'value' && typeof prtyNameV.value === 'string') {
-				var name = prtyNameV.value
-				switch (objType.type) {
-					case 'value':
-						var objKey = objType.value.key
-						state.put(Keys.prty(objKey,name), v) // TODO: invoke setter?
-						break;
-					case 'object':
-						// TODO: check type of v vs object type?
-						break;
-				}
-			}
-			break;
-		case 'const':
-			state.put(Keys.local(stmt.dst), {type: 'value', value: stmt.value})
-			break;
-		case 'create-object':
-			// ignore strong update issues for now
-			var id = state.getHeapLocation(stmt.$id)
-			stmt.properties.forEach(function(prty) {
-				if (prty.type === 'value') {
-					state.put(Keys.prty(id,prty.name), state.get(Keys.local(prty.value)))
-				} // TODO: store getter/setter?
-			})
-			state.put(Keys.local(stmt.dst), {type: 'value', value: {key: id}})
-			break;
-		case 'create-array':
-			// TODO: better modeling of arrays
-			state.put(Keys.local(stmt.dst), {type: 'reference', name: 'Array', typeArguments: {type: 'any'}})
-			break;
-		case 'create-function':
-			var id = state.getHeapLocation(stmt.$id)
-			state.put(Keys.env(v), {type: 'value', value: state.get(Keys.current_env)})
-			state.put(Keys.local(stmt.dst), {type: 'value', value: {key: id}})
-			break;
-		case 'call-method': // TODO: implement rest
-			state.put(Keys.local(stmt.dst), {type: 'any'})
-			break;
-		case 'call-function':
-			state.put(Keys.local(stmt.dst), {type: 'any'})
-			break;
-		case 'call-constructor':
-			state.put(Keys.local(stmt.dst), {type: 'any'})
-			break;
-		case 'unary':
-			state.put(Keys.local(stmt.dst), {type: 'any'})
-			break;
-		case 'binary':
-			state.put(Keys.local(stmt.dst), {type: 'any'})
-			break;
-	}
-	return true // completes normally
-}
-
-function isSubtypeOf(state, x, y) {
-	var assumptions = Object.create(null)
-	function visit(x,y) {
-		if (x.type === 'value' && x.value === null)
-			return true // null satisfies all types
-		switch (y.type) {
-			case 'value':
-				return x.type === 'value' && valuesStrictEq(x.value, y.value)
-			case 'reference':
-				var h = canonicalizeType(x) + '~' + canonicalizeType(y)
-				if (h in assumptions)
-					return assumptions[h]
-				assumptions[h] = true
-				return assumptions[h] = visit(x, resolveTypeRef(y))
-			case 'object':
-				x = abstractToObject(x)
-				if (x.type === 'value') {
-					if (typeof x.value !== 'object')
-						return false
-					var xkey = x.value.key
-					for (var k in y.properties) {
-						var yprty = y.properties[k]
-						var xprty = state.get(Keys.prty(xkey, k))
-						if (xprty) {
-							
-						}
-					}
-					return ???
-				} else if (x.type === 'object') {
-					return ???
-				} else {
-					return false
-				}
-
-		}
-	}
-	return visit(x,y)
-}
-
-function abstractToBoolean(v) {
-	switch (v.type) {
-		case 'value':
-			return {type: 'value', value: !!v.value}
-		case 'void':
-			return {type: 'value', value: false}
-		default:
-			return {type: 'boolean'}
-	}
-}
-
-function abstractToObject(v) {
-	switch (v.type) {
-		case 'value':
-			return {type: 'value', value: coerceToObject(v.value)}
-		case 'object':
-			return v
-		case 'reference':
-			return lookupQType(v.name, v.typeArguments)
-		case 'number':
-			return {type: 'value', value: NumberPrototype}
-		case 'string':
-			return {type: 'value', value: StringPrototype}
-		case 'boolean':
-			return {type: 'value', value: BooleanPrototype}
-		default:
-			return v
-	}
-}
-
-function abstractType(x) {
-	switch (x.type) {
-		case 'value': 
-			if (x.value === null)
-				return 'null'
-			else if (typeof x.value === 'function')
-				return 'object'
-			else
-				return typeof x.value
-		case 'reference': return 'object'
-		case 'enum': return 'any'
-		default: return x.type
-	}
-}
-function abstractEqual(x, y, strict) {
-	if (x.type === 'value' && y.type === 'value') {
-		if (x.value && typeof x.value === 'object' && y.value && typeof y.value === 'object') {
-			return {type: 'value', value: x.value.key === y.value.key}
-		}
-		return {type: 'value', value: strict ? x.value === y.value : x.value == y.value}
-	}
-	if (y.type === 'value' || y.type === 'enum') {
-		var z = x; x = y; y = z; // swap x/y, so x is the value and y is the abstract type
-	}
-	// FIXME: handle enum types
-	var xt = abstractType(x)
-	var yt = abstractType(y)
-	if (xt === 'any' || yt === 'any')
-		return {type: 'boolean'}
-	if (xt !== yt && strict)
-		return {type: 'value', value: false} // values of different types cannot be strictly equal
-	// abstract types: string, number, boolean, void, object, null   (null only for value types)
-	if (x.type === 'value') {
-		// value-type comparison
-		switch (xt + '-' + yt) {
-			// String value vs type
-			case 'string-number': 
-			case 'string-boolean': 
-				if (isNumberLikeString(x.value))
-					return {type: 'boolean'}
-				else
-					return {type: 'value', value: false}
-			case 'string-object':
-			case 'string-void':
-			case 'string-string':
-				return {type: 'boolean'}
-
-			// Number value vs type
-			case 'number-string':
-				return {type: 'boolean'}
-			case 'number-boolean':
-				if (x.value === 0 || x.value === 1)
-					return {type: 'boolean'}
-				else
-					return {type: 'value', value: false}
-			case 'number-void':
-				return {type: 'value', value: false}
-			case 'number-object':
-				if (y.brand === 'Number' || y.brand === 'Boolean' || y.brand === 'Array')
-					return {type: 'boolean'} // 0 == [], 1 == [1], 1 == new Number(1)
-				else
-					return {type: 'value', value: false}
-			case 'number-number':
-				return isNaN(x.value) ? {type: 'value', value:false} : {type: 'boolean'}
-
-			// Boolean value vs type
-			case 'boolean-string':
-			case 'boolean-number':
-				return {type: 'boolean'}
-			case 'boolean-void':
-				return {type: 'value', value: false}
-			case 'boolean-object':
-				if (y.brand === 'Number' || y.brand === 'Boolean' || y.brand === 'Array')
-					return {type: 'boolean'} // false == [], true == [1], true == new Boolean(1)
-				else
-					return {type: 'value', value: false}
-			case 'boolean-boolean':
-				return {type: 'boolean'}
-
-
-			// Object value vs type
-			case 'object-number:'
-			case 'object-boolean:'
-				if (hasBrand(x.value, 'Number') || hasBrand(x.value, 'Boolean') || hasBrand(x.value, 'Array'))
-					return {type: 'boolean'}
-				else
-					return {type: 'value', value: false}
-			case 'object-void':
-				return {type: 'value', value: false}
-			case 'object-string':
-				return {type: 'boolean'}
-			case 'object-object': // TODO: check against type for compatibility?
-				return {type: 'boolean'}
-
-			case 'null-string':
-			case 'null-number':
-			case 'null-boolean':
-			case 'null-object':
-				return {type: 'boolean'} // y could be null since null satisfies all types
-
-			case 'null-void':
-				return {type: 'value', value: true} // null == null and null == undefined
-		}
-	} else {
-		// type-type comparison
-		switch (xt + '-' + yt) {
-			case 'string-number': 
-			case 'string-boolean': 
-			case 'string-object':
-			case 'string-void':
-				return {type: 'boolean'}
-			case 'string-string':
-
-			case 'number-string':
-			case 'number-boolean':
-			case 'number-void':
-			case 'number-object':
-			case 'number-number':
-				return {type: 'boolean'}
-
-			case 'boolean-string':
-			case 'boolean-number':
-			case 'boolean-void':
-			case 'boolean-object':
-			case 'boolean-boolean':
-				return {type: 'boolean'}
-
-			case 'object-number:'
-			case 'object-string:'
-			case 'object-boolean:'
-			case 'object-void':
-			case 'object-object': // TODO: check types for compatibility?
-				return {type: 'boolean'}
-
-			case 'void-number':
-			case 'void-boolean':
-			case 'void-string':
-			case 'void-object':
-				return {type: 'boolean'}
-			case 'void-void':
-				return {type: 'value', value: true}
-		}
-	}
-	throw new Error("Unhandled case in abstractEqual")
-}
-function abstractNegate(x) {
-	switch (x.type) {
-		case 'value':
-			return {type: 'value', value: !x.value}
-		case 'boolean':
-			return x;
-		case 'void':
-			return {type: 'value', value: true}
-		default:
-			return {type: 'boolean'}
-	}
-}
-function abstractCompare(x, y, operator) {
-	switch (x.type + '-' + y.type) {
-		case 'value-value':
-			if (x.value && typeof x.value === 'object' || y.value && typeof y.value === 'object') {
-				return {type: 'boolean'}
-			}
-			var r;
-			switch (operator) {
-				case '<=': r = x.value <= y.value; break;
-				case '<': r = x.value < y.value; break;
-				case '>': r = x.value > y.value; break;
-				case '>=': r = x.value >= y.value; break;
-			}
-			return {type: 'value', value: r}
-
-		case 'number-number':
-		case 'string-string':
-			return {type: 'boolean'}
-
-		default:
-			return {type: 'value', value: false}
-	}
-}
-function abstractPlus(x, y) {
-	if (x.type === 'value' && y.type === 'value')  {
-		var r = x.value + y.value
-		if (r === 0 || r === 1 || r === -1 || r === '' || r === x.value || r === String(x.value) || r === y.value || r === String(y.value))
-			return {type: 'value', value: r}
-	}
-	switch (abstractType(x) + '-' + abstractType(y)) {
-		case 'number-number':
-			return {type: 'number'}
-		case 'string-string':
-			return {type: 'string'}
-		default:
-			return {type: 'string'}
-	}
-}
-function abstractArithmetic(x, y, operator) {
-	if (x.type === 'value' && typeof x.value === 'number' && y.type === 'value' && typeof y.value === 'number') {
-		var r;
-		switch (operator) {
-			case '<<': r = x.value << y.value; break;
-			case '>>': r = x.value >> y.value; break;
-			case '>>>': r = x.value >>> y.value; break;
-			case '-': r = x.value - y.value; break;
-			case '*': r = x.value * y.value; break;
-			case '/': r = x.value / y.value; break;
-			case '%': r = x.value % y.value; break;
-			case '^': r = x.value ^ y.value; break;
-			case '|': r = x.value | y.value; break;
-			case '&': r = x.value & y.value; break;
-		}
-		if (r === 0 || r === 1 || r === -1 || r === x.value || r === y.value)
-			return {type: 'value', value: r}
-		else
-			return {type: 'number'} // widen to ensure termination
-	}
-	return {type: 'number'}
-}
-function abstractInstanceof(x,y) {
-	if (x.type === 'value' && y.type === 'value') {
-		var prty = lookupObject(y.value.key).propertyMap.get("prototype")
-		if (!prty) {
-			return null // TypeError at runtime
-		}
-		if (!('value' in prty))
-			return {type: 'boolean'} // prototype hidden behind getter
-		var proto = prty.value
-		var v = x.value
-		while (v && typeof v === 'object') {
-			if (valuesStrictEq(v,proto))
-				return {type: 'value', value: true}
-			v = lookupObject(v.key).prototype
-		}
-		return {type: 'value', value: false}
-	}
-	if (y.type === 'value') {
-		// TODO: check against type of left operand
-		return {type: 'boolean'}
-	}
-	if (x.type === 'value') {
-		// TODO: check against type of right operand
-		return {type: 'boolean'}
-	}
-	// TODO: check compatibility of types
-	return {type: 'boolean'}
-}
-function abstractIn(x, y) {
-	if (y.type === 'value') {
-		if (y.value === null)
-			return null // throws exception
-		if (typeof y.value !== 'object')
-			return null
-		x = abstractToString(x)
-		if (x.type === 'value') {
-			var obj = lookupObject(y.key)
-			return {type: 'value', value: obj.propertyMap.has(x.value)}
-		} else {
-			return {type: 'boolean'}
-		}
-	} else if (y.type === 'object') {
-		x = abstractToString(x)
-		if (x.type === 'value') {
-			if (x.value in y.properties)
-				return {type: 'value', value: true}
-			if (x.stringIndexer || x.numberIndexer)
-				return {type: 'boolean'}
-			return {type: 'value', value: false}
-		} else {
-			return {type: 'boolean'}
-		}
-	} else {
-		return null;
-	}
-}
-function abstractToString(x) {
-	if (x.type !== 'value')
-		return {type: 'string'}
-	switch (typeof x.value) {
-		case 'number':
-			return {type: 'value', value: String(x.value)}
-		case 'string':
-			return x
-		case 'boolean':
-			return {type: 'value', value: (x.value ? 'true' : 'false')}
-		case 'undefined':
-			return {type: 'value', value:'undefined'}
-		case 'object':
-			return (x === null) ? {type: 'value', value:'null'} : {type: 'string'}
-		case 'function':
-			return {type: 'string'}
-		default:
-			return {type: 'string'}
 	}
 }
 
