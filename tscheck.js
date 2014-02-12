@@ -12,6 +12,7 @@ program.option('--compact', 'Report at most one violation per type path')
 	   .option('--suggest', 'Suggest additions to the interface')
 	   .option('--coverage', 'Print declaration file coverage')
 	   .option('--no-warn', 'Squelch type errors')
+	   .option('--pts-dot', 'Print graphviz dot for points-to graph')
 program.parse(process.argv);
 
 if (program.args.length < 2) {
@@ -1038,6 +1039,15 @@ UNode.prototype.rep = function() {
 		return p
 	return this.parent = p.rep()
 };
+UNode.prototype.getPrty = function(name) {
+	var r = this.rep()
+	var n = r.properties.get(name)
+	if (!n) {
+		n = new UNode
+		r.properties.put(name, n)
+	}
+	return n
+}
 
 
 function Unifier() {
@@ -1051,7 +1061,7 @@ Unifier.prototype.unify = function(n1, n2) {
 	if (n2.rank > n1.rank) {
 		var z = n1; n1 = n2; n2 = z; // swap n1/n2 so n1 has the highest rank
 	}
-	if (n1.rank > n2.rank) {
+	if (n1.rank === n2.rank) {
 		n1.rank++
 	}
 	n2.parent = n1
@@ -1112,21 +1122,21 @@ Unifier.prototype.complete = function() {
 // - $components (repr of SCC only): list of members in SCC
 //
 // Returns the list of representative nodes, topologically sorted
-function computeSCCs() {  // see: http://en.wikipedia.org/wiki/Tarjan's_strongly_connected_components_algorithm
+function computeSCCs(nodes) {  // see: http://en.wikipedia.org/wiki/Tarjan's_strongly_connected_components_algorithm
 	var components = []
 	var index = 0
 	var stack = []
-	for (var i=0; i<unifyNodes.length; i++) {
-		var node = unifyNodes[i]
+	for (var i=0; i<nodes.length; i++) {
+		var node = nodes[i]
 		if (node.rep() === node) {
-			if (typeof node.$index !== 'number') {
+			if (typeof node.$scc_index !== 'number') {
 				scc(node)
 			}
 		}
 	}
 	function scc(v) {
-		v.$index = index
-		v.$lowlink = index
+		v.$scc_index = index
+		v.$scc_lowlink = index
 		index++
 		stack.push(v)
 
@@ -1134,15 +1144,15 @@ function computeSCCs() {  // see: http://en.wikipedia.org/wiki/Tarjan's_strongly
 			if (k[0] !== '$')
 				continue
 			var w = v.properties[k].rep()
-			if (typeof w.$index !== 'number') {
+			if (typeof w.$scc_index !== 'number') {
 				scc(w)
-				v.$lowlink = Math.min(v.$lowlink, w.$lowlink)
+				v.$scc_lowlink = Math.min(v.$scc_lowlink, w.$scc_lowlink)
 			} else if (w.$onstack) {
-				v.$lowlink = Math.min(v.$lowlink, w.$index)
+				v.$scc_lowlink = Math.min(v.$scc_lowlink, w.$scc_index)
 			}
 		}
 
-		if (v.$lowlink === v.$index) {
+		if (v.$scc_lowlink === v.$scc_index) {
 			components.push(v)
 			var cmp = v.$component = []
 			var w;
@@ -1157,8 +1167,8 @@ function computeSCCs() {  // see: http://en.wikipedia.org/wiki/Tarjan's_strongly
 	return components
 }
 
-function propagateTypes() {
-	var components = computeSCCs()
+function propagateTypes(nodes) {
+	var components = computeSCCs(nodes)
 	components.forEach(function(c) {
 		// propagate round inside component
 		var worklist = []
@@ -1260,9 +1270,113 @@ function lookupOnType(t, name) { // type X string -> type[]
 // 		Static Analysis
 // --------------------------
 
-function numberFunctions(ast) {
+
+// Returns the given AST node's immediate children as an array.
+// Property names that start with $ are considered annotations, and will be ignored.
+function children(node) {
+    var result = [];
+    for (var k in node) {
+        if (!node.hasOwnProperty(k))
+            continue;
+        if (k[0] === '$')
+            continue;
+        var val = node[k];
+        if (!val)
+            continue;
+        if (typeof val === "object" && typeof val.type === "string") {
+            result.push(val);
+        }
+        else if (val instanceof Array) {
+            for (var i=0; i<val.length; i++) {
+                var elm = val[i];
+                if (typeof elm === "object" && typeof elm.type === "string") {
+                    result.push(elm);
+                }
+            }
+        } 
+    }
+    return result;
+}
+
+// Assigns parent pointers to each node. The parent pointer is called $parent.
+function injectParentPointers(node, parent) {
+    node.$parent = parent;
+    var list = children(node);
+    for (var i=0; i<list.length; i++) {
+        injectParentPointers(list[i], node);
+    }
+}
+
+// Returns the function or program immediately enclosing the given node, possibly the node itself.
+function getEnclosingFunction(node) {
+    while  (node.type !== 'FunctionDeclaration' && 
+            node.type !== 'FunctionExpression' && 
+            node.type !== 'Program') {
+        node = node.$parent;
+    }
+    return node;
+}
+
+// Returns the function, program or catch clause immediately enclosing the given node, possibly the node itself.
+function getEnclosingScope(node) {
+    while  (node.type !== 'FunctionDeclaration' && 
+            node.type !== 'FunctionExpression' && 
+            node.type !== 'CatchClause' &&
+            node.type !== 'Program') {
+        node = node.$parent;
+    }
+    return node;
+}
+
+// Injects an the following into functions, programs, and catch clauses
+// - $env: Map from variable names in scope to Identifier at declaration
+// - $depth: nesting depth from top-level
+function injectEnvs(node) {
+    switch (node.type) {
+        case 'Program':
+            node.$env = new Map;
+            node.$depth = 0;
+            break;
+        case 'FunctionExpression':
+            node.$env = new Map;
+            node.$depth = 1 + getEnclosingScope(node.$parent).$depth;
+            if (node.id) {
+                node.$env.put(node.id.name, node.id)
+            }
+            for (var i=0; i<node.params.length; i++) {
+                node.$env.put(node.params[i].name, node.params[i])
+            }
+            node.$env.put('arguments', node)
+            break;
+        case 'FunctionDeclaration':
+            var parent = getEnclosingFunction(node.$parent); // note: use getEnclosingFunction, because fun decls are lifted outside catch clauses
+            node.$env = new Map;
+            node.$depth = 1 + parent.$depth;
+            parent.$env.put(node.id.name, node.id)
+            for (var i=0; i<node.params.length; i++) {
+                node.$env.put(node.params[i].name, node.params[i])
+            }
+            node.$env.put('arguments', node)
+            break;
+        case 'CatchClause':
+            node.$env = new Map;
+            node.$env.put(node.param.name, node.param)
+            node.$depth = 1 + getEnclosingScope(node.$parent).$depth;
+            break;
+        case 'VariableDeclarator':
+            var parent = getEnclosingFunction(node) // note: use getEnclosingFunction, because vars ignore catch clauses
+            parent.$env.put(node.id.name, node.id)
+            break;
+    }
+    children(node).forEach(injectEnvs)
+}
+
+
+function numberASTNodes(ast) {
 	var functions = []
+	var next_id = 0
 	function visit(node) {
+		node.$id = ++next_id
 		if (node.type === 'FunctionExpression' || node.type === 'FunctionDeclaration' || node.type === 'Program') {
 			node.$function_id = functions.length
 			functions.push(node)
@@ -1274,11 +1388,13 @@ function numberFunctions(ast) {
 }
 
 function getFunction(id) {
-	return ast && ast.$id2function[id]
+	return sourceFileAst && sourceFileAst.$id2function[id]
 }
 
 function prepareAST(ast) {
-	numberFunctions(ast)
+	numberASTNodes(ast)
+	injectParentPointers(ast)
+	injectEnvs(ast)
 }
 
 if (sourceFileAst) {
@@ -1293,19 +1409,26 @@ function substituteParameterType(t) {
 	}
 }
 
-function inferTypesInFunction(fun) {
+function checkFunctionSig(call, fun_key, this_type) {
+	var fun_obj = lookupObject(fun_key)
+	if (!fun_obj.function || fun_obj.function.type !== 'user')
+		return
+	var fun = getFunction(fun_obj.function.id)
 	var unifier = fun.$unifier = new Unifier
+	var unodes = []
+	function makeNode() {
+		var n = new UNode
+		unodes.push(n)
+		return n
+	}
+	var astnode2unode = Object.create(null)
 	function getNode(x) {
 		if (x instanceof UNode)
-			return x
-		if (x.$node)
-			return x.$node.rep()
-		return x.$node = new UNode
-	}
-	function getEnv(fun) {
-		if (fun.$env_node)
-			return fun.$env_node.rep()
-		return fun.$env_node = new UNode
+			return x.rep()
+		var n = astnode2unode[x.$id]
+		if (n)
+			return n.rep()
+		return astnode2unode[x.$id] = makeNode()
 	}
 	function unify(x) {
 		x = getNode(x)
@@ -1313,25 +1436,120 @@ function inferTypesInFunction(fun) {
 			unifier.unify(x, getNode(arguments[i]))
 		}
 	}
+	var astnode2env_node = Object.create(null)
+	function getEnv(fun) {
+		var n = astnode2env_node[fun.$id]
+		if (n)
+			return n.rep()
+		return astnode2env_node[fun.$id] = makeNode()
+	}
+	function getVar(node) {
+		var name = node.name
+		var scope = getEnclosingScope(node)
+		while (scope.type !== 'Program' && !scope.$env.has(name)) {
+			scope = getEnclosingScope(scope.$parent)
+		}
+		return getEnv(scope).getPrty(name)
+	}
+	function getThis(fun) {
+		return getEnv(fun).getPrty("@this")
+	}
+	function getSelf(fun) {
+		return getEnv(fun).getPrty("@self")	
+	}
+	function getReturn(fun) {
+		return getEnv(fun).getPrty("@return")	
+	}
+	function assumeAnyType(e) {
+		getNode(e).type.add({type: 'any'})
+	}
+	function assumeType(e, t) {
+		if (t.type === 'value' && t.value && typeof t.value === 'object') {
+			unify(e, getConcreteObject(t.value.key))
+		} else {
+			getNode(e).type.add(t)
+		}
+	}
+	function addPrototype(node, key) {
+		// TODO
+	}
+
+	// getConcreteObject(x) maps an object key to a union-find node
+	var concrete_objects = Object.create(null)
+	function getConcreteObject(x) {
+		var n = concrete_objects[x]
+		if (!n) {
+			concrete_objects[x] = n = makeNode()
+			assumeType(n, {type: 'value', value: {key: x}})
+		} else {
+			n = n.rep()
+		}
+		return n
+	}
+
+	// We create union-find nodes for every variable in the environment
+	// Their type is bound to the value held in the environment object,
+	// and variables pointing to the same object are unified
+	function visitEnvObjects() {
+		var scope = getEnclosingScope(fun.$parent)
+		var e = fun_obj.env
+		while (e) {
+			var obj = lookupObject(e.key)
+			scope.$env.forEach(function(name) {
+				var node = getEnv(scope).getPrty(name)
+				var prty = obj.propertyMap.get(name)
+				if (prty && 'value' in prty) {
+					assumeType(node, {type: 'value', value:prty.value})
+				}
+			})
+			e = obj.env
+			scope = getEnclosingScope(scope.$parent)
+		}
+	}
+	visitEnvObjects()
+
+	// We use the types from the call signature on the parameters
+	// FIXME: type parameters (either replace type-params by their bounds, or handle them directly)
+	// FIXME: variadic functions
+	function visitParameters() {
+		for (var i=0; i<fun.params.length; i++) {
+			unify(fun.params[i], getVar(fun.params[i]))
+			if (i < call.parameters.length) {
+				assumeType(fun.params[i], substituteParameterType(call.parameters[i].type))
+			} else {
+				assumeType(fun.params[i], {type: 'value', value: undefined})
+			}
+		}
+	}
+	visitParameters()
+
+	// Assign a value to this and the function name
+	function visitFunctionStuff() {
+		assumeType(getSelf(fun), {type: 'value', value: {key: fun_key}})
+		if (fun.type === 'FunctionExpression' && fun.id) {
+			unify(fun.id, getVar(fun.id.name), getSelf(fun))
+		}
+		if (call.new) {
+			var protoPrty = fun_obj.propertyMap.get("prototype")
+			if (protoPrty && protoPrty.value && typeof protoPrty.value === 'object') {
+				addPrototype(getThis(fun), protoPrty.value.key)
+			}
+		} else {
+			assumeType(getThis(fun), this_type)
+		}
+	}
+	visitFunctionStuff()
+
 	var NULL = true
 	var NOT_NULL = false
 	var VOID = true // result is not used or is coerced to a boolean before being used
 	var NOT_VOID = false
-	function getVar(id) {
-
-	}
-	function assumeAnyType(e) {
-		unifier.satisfyType(e, {type: 'any'})
-	}
-	function assumeType(e, t) {
-		unifier.satisfyType(e, t)
-	}
 	function visitStmt(node) {
 		switch (node.type) {
 			case 'EmptyStatement':
 				break;
 			case 'BlockStatement':
-				node.statements.forEach(visitStmt)
+				node.body.forEach(visitStmt)
 				break;
 			case 'ExpressionStatement':
 				visitExpVoid(node.expression)
@@ -1362,7 +1580,7 @@ function inferTypesInFunction(fun) {
 			case 'ReturnStatement':
 				if (node.argument) {
 					visitExp(node.argument, NOT_VOID)
-					unify(getVar("@return"), node.argument)
+					unify(getReturn(getEnclosingFunction(node)), node.argument)
 				}
 				break;
 			case 'ThrowStatement':
@@ -1417,7 +1635,8 @@ function inferTypesInFunction(fun) {
 			case 'DebuggerStatement':
 				break;
 			case 'FunctionDeclaration':
-				// TODO: track functions
+				visitStmt(node.body)
+				// TODO: track functions values
 				break;
 			case 'VariableDeclaration':
 				node.declarations.forEach(function(d) {
@@ -1452,14 +1671,16 @@ function inferTypesInFunction(fun) {
 					var name = p.key.type === 'Literal' ? String(p.key.value) : p.key.name
 					switch (p.kind) {
 						case 'init':
-							unifyPrty(node, name, p.value)
+							unify(getNode(node).getPrty(name), p.value)
 							break;
 						case 'get':
-							unifyPrty(node, name, )
+							unify(node, getThis(p.value))
+							unify(getNode(node).getPrty(name), getReturn(p.value))
 							break;
-						case 'set:'
+						case 'set':
+							unify(node, getThis(p.value))
 							if (p.value.params.length >= 1) {
-								unifyPrty(node, name, p.value.params[0])
+								unify(getNode(node).getPrty(name), p.value.params[0])
 							}
 							break;
 					}
@@ -1467,7 +1688,8 @@ function inferTypesInFunction(fun) {
 				addPrototype(node, lookupPath("Object.prototype").key)
 				return NOT_NULL
 			case 'FunctionExpression':
-				// TODO: track functions
+				// TODO: track functions values
+				visitStmt(node.body)
 				return NOT_NULL
 			case 'SequenceExpression':
 				for (var i=0; i<node.expressions.length-1; ++i) {
@@ -1519,23 +1741,201 @@ function inferTypesInFunction(fun) {
 				}
 				return NOT_NULL
 			case 'NewExpression':
+				return NOT_NULL; // TODO
 			case 'CallExpression':
+				return NOT_NULL; // TODO
 			case 'MemberExpression':
+				visitExp(node.object, NOT_VOID)
+				if (node.computed) {
+					visitExp(node.property, NOT_VOID)
+					assumeType(node, {type: 'any'})
+					// TODO: dynamic property access
+				} else {
+					unify(node, getNode(node.object).getPrty(node.property.name))
+				}
+				return NOT_NULL
 			case 'Identifier':
 				if (node.name === 'undefined') {
 					assumeType(node, {type: 'value', value: undefined})
 					return NULL
 				}
-				// TODO: variable in environment???
-				unify(getVar(node.name), node)
+				unify(getVar(node), node)
 				return NOT_NULL
 			case 'Literal':
 				assumeType(node, {type: 'value', value: node.value})
 				return node.value === null ? NULL : NOT_NULL
 		}
 	}
-	// ..
+	
+	visitStmt(fun.body)
+
 	unifier.complete()
+
+	// add all nodes to list (those created by getPrty) and discard non-root nodes from list
+	var newlist = []
+	function addNodeToList(node) {
+		node = node.rep()
+		if ('$index' in node)
+			return
+		node.$index = newlist.length
+		newlist.push(node)
+		node.properties.forEach(function(name,dst) {
+			addNodeToList(dst)
+		})
+	}
+	unodes.forEach(addNodeToList)
+	unodes = newlist // discard non-root elements
+
+	propagateTypes(unodes)
+
+	if (program.ptsDot) {
+		var dotcode = pointsToDot(unodes)
+		console.log(dotcode)
+		process.exit(1)	
+	}
+
+	// check return type
+	var node2type_compatible = Object.create(null)
+	function isNodeCompatible(node, output) {
+		node = node.rep()
+		if (node.type.any)
+			return true // fast return if node is any
+		if (output.type === 'reference') {
+			var h = node.$index + "~" + canonicalizeType(output)
+			if (node2type_compatible[h])
+				return node2type_compatible[h]
+			node2type_compatible[h] = true // assume true for nested occurrences of this judgement
+			return node2type_compatible[h] = isNodeCompatible(node, resolveTypeRef(output))
+		}
+		// TODO prototypes
+		switch (output.type) {
+			case 'object':
+				for (var k in output.properties) {
+					var inode = node.properties.get(k)
+					if (inode) {
+						if (!isNodeCompatible(inode, output.properties[k].type)) {
+							return false
+						}
+					} else {
+						return node.type.some(function (t) {
+							return lookupOnType(t, k).some(function(t) {
+								return isTypeCompatible(t, output.properties[k].type)
+							})
+						})
+					}
+				}
+				// TODO: check indexers and call signatures and brands
+				return true
+			case 'string':
+			case 'number':
+				return node.type.some(function(t) {
+					return isTypeCompatible(t, output)
+				})
+			case 'boolean':
+				return true // boolean type is sometimes used as a "boolean-like value" so we can't do a useful check here
+			case 'enum':
+				return node.type.some(function(t) {
+					return isTypeCompatible(t, output)
+				})
+			case 'void':
+				return true // it's ok to return something if void was expected
+			case 'any':
+				return true // everything satisfies any
+			case 'type-param':
+				return true // TODO type-param
+			default:
+				throw new Error("isNodeCompatible " + output.type)
+		}
+	}
+	var type2type_compatible = Object.create(null)
+	var object2type_compatible = Object.create(null)
+	function isTypeCompatible(input, output) {
+		if (input.type === 'any' || output.type === 'any')
+			return true
+		if (input.type === 'value' && input.value === null)
+			return true
+		if (input.type === 'reference' || output.type === 'reference') {
+			var h = canonicalizeType(input) + "~" + canonicalizeType(output)
+			if (h in type2type_compatible)
+				return type2type_compatible[h]
+			type2type_compatible[h] = true
+			if (input.type === 'reference')
+				input = resolveTypeRef(input)
+			if (output.type === 'reference')
+				output = resolveTypeRef(output)
+			return type2type_compatible[h] = isTypeCompatible(input, output)
+		}
+		switch (output.type) {
+			case 'object':
+				input = coerceTypeToObject(input)
+				switch(input.type) {
+					case 'object':
+						for (var k in output.properties) {
+							var oprty = output.properties[k]
+							if (k in input.properties) {
+								if (!isTypeCompatible(input.properties[k].type, oprty.type)) {
+									return false
+								}
+							} else {
+								if (!oprty.optional)
+									return false // TODO: look up using indexer
+							}
+						}
+						return true
+					case 'value':
+						var v = coerceToObject(input.value)
+						if (v && typeof v === 'object') {
+							var h = canonicalizeType(v.key) + "~" + canonicalizeType(output)
+							if (h in object2type_compatible)
+								return object2type_compatible[h]
+							object2type_compatible[h] = true
+							var obj = lookupObject(v.key)
+							for (var k in output.properties) {
+								var oprty = output.properties[k]
+								var inprty = obj.propertyMap.get(k)
+								if (inprty) {
+									if ('value' in inprty) {
+										if (!isTypeCompatible({type:'value', value:inprty.value}, oprty.type)) {
+											return object2type_compatible[h] = false
+										}
+									}
+								} else {
+									if (!oprty.optional) {
+										return object2type_compatible[h] = false
+									}
+								}
+							}
+							return true
+						} else {
+							return false
+						}
+					default:
+						return false
+				}
+			case 'string':
+				return input.type === 'string' || (input.type === 'value' && typeof input.value === 'string')
+			case 'number':
+				return input.type === 'number' || (input.type === 'value' && typeof input.value === 'number')
+			case 'boolean':
+				return input.type === 'boolean' || (input.type === 'value' && typeof input.value === 'boolean')
+			case 'enum':
+				return enum_values.get(output.name).some(function(v) {
+					return isTypeCompatible(input, {type: 'value', value: v})
+				})
+			case 'void':
+				return true
+			case 'any':
+				return true
+			case 'type-param':
+				return true // TODO: type-param
+			default:
+				throw new Error("isTypeCompatible " + input.type + " vs " + output.type)
+		}
+	}
+	var returnNode = call.new ? getThis(fun) : getReturn(fun)
+	var isOK = isNodeCompatible(returnNode, call.returnType)
+
+	return isOK
 }
 
 function checkCallSignature(call, receiverKey, functionKey, path) {
@@ -1544,17 +1944,15 @@ function checkCallSignature(call, receiverKey, functionKey, path) {
 		console.log(path + ": expected " + formatTypeCall(call) + " but found non-function object")
 		return
 	}
-	if (!cfg)
-		return // cannot analyze function without source code
 	switch (functionObj.function.type) {
 		case 'user':
 			var fun = getFunction(functionObj.function.id)
 			if (!fun)
 				return
-			if (!fun.$unifier) {
-				inferTypesInFunction(fun)
+			var ok = checkFunctionSig(call, functionKey, {type: 'value', value: {key: receiverKey}})
+			if (!ok) {
+				console.log(path + ": does not satisfy signature " + formatTypeCall(call))
 			}
-
 			break;
 		case 'bind':
 			break; // TODO: check bound functions
@@ -1565,9 +1963,46 @@ function checkCallSignature(call, receiverKey, functionKey, path) {
 }
 
 
-// --------------------------
+
+// ------------------------------------------------
+// 		Points-to graph to Graphviz Dot
+// ------------------------------------------------
+
+function escapeLabel(lbl) {
+	return lbl.replace(/[{}"<>]/g, '\\$&').replace(/\t/g,'\\t').replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/\f/g,'\\f')
+}
+
+function pointsToDot(nodes) {
+	var sb = []
+	function println(x) {
+		sb.push(x)
+	}
+	function formatUnionType(type) {
+		if (type.any)
+			return "any"
+		else {
+			var sb = []
+			for (var k in type.table) {
+				sb.push(formatType(type.table[k]))
+			}
+			return sb.join("|")
+		}
+	}
+	println("digraph {")
+	nodes.forEach(function(node) {
+		println("  " + node.$index + ' [shape=box,label="' + escapeLabel(formatUnionType(node.type)) +  '"]')
+		node.properties.forEach(function(name, dst) {
+			dst = dst.rep()
+			println("  " + node.$index + " -> " + dst.$index + " [label=\"" + escapeLabel(name) + "\"]")
+		})
+	})
+	println("}")
+	return sb.join('\n')
+}
+
+// ------------------------
 // 		Entry Point
-// --------------------------
+// ------------------------
 
 function main() {
 	// TODO: move loading of inputs into main function
