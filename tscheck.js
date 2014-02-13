@@ -372,6 +372,8 @@ function canonicalizeType(type) {
 			return 'E:' + type.name;
 		case 'value':
 			return 'W:' + canonicalizeValue(type.value);
+		case 'node':
+			return 'X:' + type.node.rep().id
 		default:
 			throw new Error("Unrecognized type: " + util.inspect(type))
 	}
@@ -1037,14 +1039,14 @@ UnionType.prototype.forEach = function(f) {
 // 		UNION-FIND
 // ----------------------
 
-var unode_id = 1
+var unode_id = 0
 function UNode() {
 	this.parent = this
 	this.rank = 0
 	this.properties = new Map
 	this.type = new UnionType
 	this.prototypes = Object.create(null)
-	this.id = unode_id++
+	this.id = ++unode_id
 }
 UNode.prototype.rep = function() {
 	var p = this.parent
@@ -1096,6 +1098,8 @@ Unifier.prototype.unify = function(n1, n2) {
 	n2.properties = null
 	n2.type = null
 	n2.prototypes = null
+	n1.id = ++unode_id
+	n2.id = null
 };
 Unifier.prototype.unifyPrty = function(n1, prty, n2) {
 	n1 = n1.rep()
@@ -2060,6 +2064,8 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 	// check return type
 	var node2type_compatible = Object.create(null)
 	function isNodeCompatible(node, output, this_type) {
+		if (arguments.length !== 3)
+			throw new Error("isNodeCompatible takes 3 arguments") // TODO: merge with isTypeComptabiel and introduce proper 'node' type
 		node = node.rep()
 		if (node.type.any)
 			return true // fast return if node is any
