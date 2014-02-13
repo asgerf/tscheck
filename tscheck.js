@@ -650,6 +650,17 @@ function hasBrand(value, brand) {
 	return false;
 }
 
+function checkCallSignature(call, receiverKey, functionKey, path) {
+	var functionObj = lookupObject(functionKey)
+	if (!functionObj.function) {
+		console.log(path + ": expected " + formatTypeCall(call) + " but found non-function object")
+		return
+	}
+	if (!isCallSatisfiedByObject(call, {type: 'value', value: {key: receiverKey}}, functionKey)) {
+		console.log(path + ": does not satisfy signature " + formatTypeCall(call))
+	}
+}
+
 // --------------------
 // 		Subtyping
 // --------------------
@@ -1026,12 +1037,14 @@ UnionType.prototype.forEach = function(f) {
 // 		UNION-FIND
 // ----------------------
 
+var unode_id = 1
 function UNode() {
 	this.parent = this
 	this.rank = 0
 	this.properties = new Map
 	this.type = new UnionType
 	this.prototypes = Object.create(null)
+	this.id = unode_id++
 }
 UNode.prototype.rep = function() {
 	var p = this.parent
@@ -1266,6 +1279,132 @@ function lookupOnType(t, name) { // type X string -> type[]
 	}
 }
 
+
+// ----------------------------------
+// 		Type-Type Compatibility
+// ----------------------------------
+
+var type2type_compatible = Object.create(null)
+var object2type_compatible = Object.create(null)
+function isTypeCompatible(input, output) {
+	if (input.type === 'any' || output.type === 'any')
+		return true
+	if (input.type === 'value' && input.value === null)
+		return true
+	if (input.type === 'reference' || output.type === 'reference') {
+		var h = canonicalizeType(input) + "~" + canonicalizeType(output)
+		if (h in type2type_compatible)
+			return type2type_compatible[h]
+		type2type_compatible[h] = true
+		if (input.type === 'reference')
+			input = resolveTypeRef(input)
+		if (output.type === 'reference')
+			output = resolveTypeRef(output)
+		return type2type_compatible[h] = isTypeCompatible(input, output)
+	}
+	switch (output.type) {
+		case 'object':
+			input = coerceTypeToObject(input)
+			switch(input.type) {
+				case 'object':
+					for (var k in output.properties) {
+						var oprty = output.properties[k]
+						if (k in input.properties) {
+							if (!isTypeCompatible(input.properties[k].type, oprty.type)) {
+								return false
+							}
+						} else {
+							if (!oprty.optional)
+								return false // TODO: look up using indexer
+						}
+					}
+					var callsOK = output.calls.all(function(oc) {
+						return input.calls.some(function(ic) {
+							return isCallSubtypeOf(ic, oc)
+						})
+					})
+					if (!callsOK)
+						return false
+					return true
+				case 'value':
+					var v = coerceToObject(input.value)
+					if (v && typeof v === 'object') {
+						var h = canonicalizeType(v.key) + "~" + canonicalizeType(output)
+						if (h in object2type_compatible)
+							return object2type_compatible[h]
+						object2type_compatible[h] = true
+						var obj = lookupObject(v.key)
+						for (var k in output.properties) {
+							var oprty = output.properties[k]
+							var inprty = obj.propertyMap.get(k)
+							if (inprty) {
+								if ('value' in inprty) {
+									if (!isTypeCompatible({type:'value', value:inprty.value}, oprty.type)) {
+										return object2type_compatible[h] = false
+									}
+								}
+							} else {
+								if (!oprty.optional) {
+									return object2type_compatible[h] = false
+								}
+							}
+						}
+						return true
+					} else {
+						return false
+					}
+				default:
+					return false
+			}
+		case 'string':
+			input = substituteParameterType(input)
+			return input.type === 'string' || (input.type === 'value' && typeof input.value === 'string')
+		case 'string-const':
+			input = substituteParameterType(input)
+			return input.type === 'string' || (input.type === 'value' && input.value === output.value) // TODO: subtype or compatibility??
+		case 'number':
+			return input.type === 'number' || (input.type === 'value' && typeof input.value === 'number')
+		case 'boolean':
+			return input.type === 'boolean' || (input.type === 'value' && typeof input.value === 'boolean')
+		case 'enum':
+			var vals = enum_values.get(output.name)
+			if (vals.length === 0)
+				return true
+			return vals.some(function(v) {
+				return isTypeCompatible(input, {type: 'value', value: v})
+			})
+		case 'void':
+			return true
+		case 'any':
+			return true
+		case 'type-param':
+			return true // TODO: type-param
+		default:
+			throw new Error("isTypeCompatible " + input.type + " vs " + output.type)
+	}
+}
+
+function isCallSubtypeOf(incall, outcall) {
+	// TODO: type parameters
+	// TODO: variadic
+
+	// Check that the parameters to outcall can be used in a valid call to incall
+	for (var i=0; i<incall.parameters.length; ++i) {
+		var iparm = incall.parameters[i]
+		if (i < outcall.parameters.length) {
+			var oparm = outcall.parameters[i]
+			if (!isTypeCompatible(oparm.type, iparm.type)) {
+				return false
+			}
+		} else if (!iparm.optional) {
+			return false
+		}
+	}
+
+	// Check that return type from incall is a valid return type from outcall
+	return isTypeCompatible(incall.returnType, outcall.returnType)
+}
+
 // --------------------------
 // 		Static Analysis
 // --------------------------
@@ -1401,6 +1540,8 @@ if (sourceFileAst) {
 	prepareAST(sourceFileAst)
 }
 
+
+
 function substituteParameterType(t) {
 	if (t.type === 'string-const') {
 		return {type: 'value', value: t.value}
@@ -1409,10 +1550,44 @@ function substituteParameterType(t) {
 	}
 }
 
-function checkFunctionSig(call, fun_key, this_type) {
+function isCallSatisfiedByType(call, this_type, t) {
+	if (arguments.length !== 3)
+		throw new Error("isCallSatisfiedByType takes 3 arguments")
+	if (t.type === 'reference')
+		t = resolveTypeRef(t)
+	switch (t.type) {
+		case 'value':
+			if (t.value && typeof t.value === 'object') {
+				return checkFunctionSig(call, t.value.key, this_type)
+			} else {
+				return false
+			}
+		case 'object':
+			return t.calls.some(function(c) {
+				return isCallSubtypeOf(c, call)
+			})
+		case 'any':
+			return true
+		default:
+			return false
+	}
+}
+
+var call_object_assumptions = Object.create(null)
+function isCallSatisfiedByObject(call, this_type, fun_key) {
+	if (arguments.length !== 3)
+		throw new Error("isCallSatisfiedByObject takes 3 arguments")
 	var fun_obj = lookupObject(fun_key)
-	if (!fun_obj.function || fun_obj.function.type !== 'user')
-		return
+	if (!fun_obj.function)
+		return false // not a function object
+	if (fun_obj.function.type !== 'user')
+		return true // can't check (TODO: check 'bind' functions)
+
+	var h = fun_key + "~" + canonicalizeCall(call) + (call.new ? '' : ("~" + canonicalizeType(this_type)))
+	if (h in call_object_assumptions)
+		return call_object_assumptions[h]
+	call_object_assumptions[h] = true
+
 	var fun = getFunction(fun_obj.function.id)
 	var unifier = fun.$unifier = new Unifier
 	var unodes = []
@@ -1471,7 +1646,8 @@ function checkFunctionSig(call, fun_key, this_type) {
 		}
 	}
 	function addPrototype(node, key) {
-		// TODO
+		// TODO: can we get away with this??
+		getNode(node).type.add({type: 'value', value: {key: key}})
 	}
 
 	// getConcreteObject(x) maps an object key to a union-find node
@@ -1649,6 +1825,8 @@ function checkFunctionSig(call, fun_key, this_type) {
 					}
 				})
 				break;
+			default:
+				throw new Error("Unknown statement: " + node.type)
 		}
 	}
 	function visitExpVoid(node) {
@@ -1698,9 +1876,68 @@ function checkFunctionSig(call, fun_key, this_type) {
 				unify(node, node.expressions.last())
 				return visitExp(node.expressions.last(), void_ctx)
 			case 'UnaryExpression':
-				return NOT_NULL; // TODO: compute type
+				switch (node.operator) {
+					case '+':
+					case '~':
+					case '-':
+						visitExp(node.argument, NOT_VOID)
+						assumeType(node, {type: 'number'})
+						break;
+					case '!':
+						visitExp(node.argument, VOID)
+						assumeType(node, {type: 'boolean'})
+						break;
+					case 'void':
+						visitExp(node.argument, VOID)
+						assumeType(node, {type: 'value', value: undefined})
+						return NULL
+					case 'typeof':
+						visitExp(node.argument, VOID)
+						assumeType(node, {type: 'string'})
+						break;
+					default:
+						throw new Error("Unknown unary operator: " + node.operator)
+				}
+				return NOT_NULL
 			case 'BinaryExpression':
-				return NOT_NULL // TODO: compute type
+				visitExpVoid(node.left, NOT_VOID)
+				visitExpVoid(node.right, NOT_VOID)
+				switch (node.operator) {
+					case "==":
+					case "!=":
+					case "===":
+					case "!==":
+				    case "<":
+				    case "<=":
+				    case ">":
+				    case ">=":
+				    case "in":
+				    case "instanceof":
+				    	assumeType(node, {type: 'boolean'})
+				    	break;
+
+				    case "<<":
+				    case ">>":
+				    case ">>>":
+				    case "-":
+				    case "*":
+				    case "/":
+				    case "%":
+				    case "|":
+				    case "^":
+				    case "&":
+				    	assumeType(node, {type: 'number'})
+				    	break;
+
+				    case "+": // could be either number or string (TODO: handle this more precisely!)
+				    	assumeType(node, {type: 'string'})
+				    	assumeType(node, {type: 'number'})
+				    	break;
+
+				    default:
+				    	throw new Error("Unknown binary operator: " + node.operator)
+				}
+				return NOT_NULL
 			case 'AssignmentExpression':
 				if (node.operator === '=') {
 					visitExp(node.left, NOT_VOID)
@@ -1708,16 +1945,37 @@ function checkFunctionSig(call, fun_key, this_type) {
 					if (r !== NULL) {
 						unify(node, node.left, node.right)
 					}
-					return 
+					return r
 				} else {
-					// TODO: compute type
 					visitExp(node.left, NOT_VOID)
 					visitExp(node.right, NOT_VOID)
-					return NULL
+					unify(node, node.left)
+					switch (node.operator) {
+						case "+=":
+							assumeType(node, {type: 'string'})
+							assumeType(node, {type: 'number'})
+							break;
+						case "-=":
+						case "*=":
+						case "/=":
+						case "%=":
+						case "<<=":
+						case ">>=" :
+						case ">>>=":
+						case "&=":
+						case "|=":
+						case "^=":
+							assumeType(node, {type: 'number'})
+							break;
+						default:
+							throw new Error("Unknown compound assignment operator: " + node.operator)
+					}
+					return NOT_NULL
 				}
 			case 'UpdateExpression':
 				visitExp(node.argument, NOT_VOID)
-				return NULL;
+				assumeType(node, {type: 'number'})
+				return NOT_NULL
 			case 'LogicalExpression':
 				if (node.operator === '&&') {
 					unify(node, node.right)
@@ -1759,11 +2017,16 @@ function checkFunctionSig(call, fun_key, this_type) {
 					assumeType(node, {type: 'value', value: undefined})
 					return NULL
 				}
-				unify(getVar(node), node)
+				unify(node, getVar(node))
 				return NOT_NULL
 			case 'Literal':
 				assumeType(node, {type: 'value', value: node.value})
 				return node.value === null ? NULL : NOT_NULL
+			case 'ThisExpression':
+				unify(node, getThis(getEnclosingFunction(node)))
+				return NOT_NULL
+			default:
+				throw new Error("Unknown expression: " + node.type)
 		}
 	}
 	
@@ -1796,7 +2059,7 @@ function checkFunctionSig(call, fun_key, this_type) {
 
 	// check return type
 	var node2type_compatible = Object.create(null)
-	function isNodeCompatible(node, output) {
+	function isNodeCompatible(node, output, this_type) {
 		node = node.rep()
 		if (node.type.any)
 			return true // fast return if node is any
@@ -1813,7 +2076,7 @@ function checkFunctionSig(call, fun_key, this_type) {
 				for (var k in output.properties) {
 					var inode = node.properties.get(k)
 					if (inode) {
-						if (!isNodeCompatible(inode, output.properties[k].type)) {
+						if (!isNodeCompatible(inode, output.properties[k].type, )) {
 							return false
 						}
 					} else {
@@ -1824,7 +2087,15 @@ function checkFunctionSig(call, fun_key, this_type) {
 						})
 					}
 				}
-				// TODO: check indexers and call signatures and brands
+				var callsOK = output.calls.all(function(oc) {
+					// TODO: use tracked function value
+					return node.type.some(function(t) {
+						return isCallSatisfiedByType(oc, this_type, t)
+					})
+				})
+				if (!callsOK)
+					return false
+				// TODO: check indexers and brands
 				return true
 			case 'string':
 			case 'number':
@@ -1847,119 +2118,10 @@ function checkFunctionSig(call, fun_key, this_type) {
 				throw new Error("isNodeCompatible " + output.type)
 		}
 	}
-	var type2type_compatible = Object.create(null)
-	var object2type_compatible = Object.create(null)
-	function isTypeCompatible(input, output) {
-		if (input.type === 'any' || output.type === 'any')
-			return true
-		if (input.type === 'value' && input.value === null)
-			return true
-		if (input.type === 'reference' || output.type === 'reference') {
-			var h = canonicalizeType(input) + "~" + canonicalizeType(output)
-			if (h in type2type_compatible)
-				return type2type_compatible[h]
-			type2type_compatible[h] = true
-			if (input.type === 'reference')
-				input = resolveTypeRef(input)
-			if (output.type === 'reference')
-				output = resolveTypeRef(output)
-			return type2type_compatible[h] = isTypeCompatible(input, output)
-		}
-		switch (output.type) {
-			case 'object':
-				input = coerceTypeToObject(input)
-				switch(input.type) {
-					case 'object':
-						for (var k in output.properties) {
-							var oprty = output.properties[k]
-							if (k in input.properties) {
-								if (!isTypeCompatible(input.properties[k].type, oprty.type)) {
-									return false
-								}
-							} else {
-								if (!oprty.optional)
-									return false // TODO: look up using indexer
-							}
-						}
-						return true
-					case 'value':
-						var v = coerceToObject(input.value)
-						if (v && typeof v === 'object') {
-							var h = canonicalizeType(v.key) + "~" + canonicalizeType(output)
-							if (h in object2type_compatible)
-								return object2type_compatible[h]
-							object2type_compatible[h] = true
-							var obj = lookupObject(v.key)
-							for (var k in output.properties) {
-								var oprty = output.properties[k]
-								var inprty = obj.propertyMap.get(k)
-								if (inprty) {
-									if ('value' in inprty) {
-										if (!isTypeCompatible({type:'value', value:inprty.value}, oprty.type)) {
-											return object2type_compatible[h] = false
-										}
-									}
-								} else {
-									if (!oprty.optional) {
-										return object2type_compatible[h] = false
-									}
-								}
-							}
-							return true
-						} else {
-							return false
-						}
-					default:
-						return false
-				}
-			case 'string':
-				return input.type === 'string' || (input.type === 'value' && typeof input.value === 'string')
-			case 'number':
-				return input.type === 'number' || (input.type === 'value' && typeof input.value === 'number')
-			case 'boolean':
-				return input.type === 'boolean' || (input.type === 'value' && typeof input.value === 'boolean')
-			case 'enum':
-				return enum_values.get(output.name).some(function(v) {
-					return isTypeCompatible(input, {type: 'value', value: v})
-				})
-			case 'void':
-				return true
-			case 'any':
-				return true
-			case 'type-param':
-				return true // TODO: type-param
-			default:
-				throw new Error("isTypeCompatible " + input.type + " vs " + output.type)
-		}
-	}
 	var returnNode = call.new ? getThis(fun) : getReturn(fun)
 	var isOK = isNodeCompatible(returnNode, call.returnType)
 
-	return isOK
-}
-
-function checkCallSignature(call, receiverKey, functionKey, path) {
-	var functionObj = lookupObject(functionKey)
-	if (!functionObj.function) {
-		console.log(path + ": expected " + formatTypeCall(call) + " but found non-function object")
-		return
-	}
-	switch (functionObj.function.type) {
-		case 'user':
-			var fun = getFunction(functionObj.function.id)
-			if (!fun)
-				return
-			var ok = checkFunctionSig(call, functionKey, {type: 'value', value: {key: receiverKey}})
-			if (!ok) {
-				console.log(path + ": does not satisfy signature " + formatTypeCall(call))
-			}
-			break;
-		case 'bind':
-			break; // TODO: check bound functions
-		case 'native':
-		case 'unknown':
-			break;
-	}
+	return call_object_assumptions[h] = isOK
 }
 
 
