@@ -8,3 +8,7 @@ Foo.prototype.getX = function() {
 Foo.prototype.getY = function() {
 	return this.y;
 }
+
+function numb() {
+	return 23;
+}

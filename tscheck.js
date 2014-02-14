@@ -460,10 +460,10 @@ function coerceToObject(x) {
 
 function coerceTypeToObject(x) {
 	switch (x.type) {
-		case 'number': return {type: 'reference', name:'Number'}
-		case 'string': return {type: 'reference', name:'String'}
-		case 'string-const': return {type: 'reference', name:'String'}
-		case 'boolean': return {type: 'reference', name:'Boolean'}
+		case 'number': return {type: 'reference', name:'Number', typeArguments: []}
+		case 'string': return {type: 'reference', name:'String', typeArguments: []}
+		case 'string-const': return {type: 'reference', name:'String', typeArguments: []}
+		case 'boolean': return {type: 'reference', name:'Boolean', typeArguments: []}
 		default: return x
 	}
 }
@@ -1128,6 +1128,9 @@ Unifier.prototype.complete = function() {
 	}
 }
 
+var unifier = new Unifier;
+
+
 // -----------------------------
 // 		 TYPE PROPAGATION
 // -----------------------------
@@ -1270,10 +1273,10 @@ function lookupOnType(t, name) { // type X string -> type[]
 			return values
 		case 'value':
 			var v = coerceToObject(t.value)
-			if (v.value && typeof v.value === 'object') {
-				var obj = lookupObject(t.value.key)
+			if (v && typeof v === 'object') {
+				var obj = lookupObject(v.key)
 				var prty = obj.propertyMap.get(name)
-				if (prty) {
+				if (prty && 'value' in prty) { // TODO: getters and setters
 					return [{type: 'value', value: prty.value}]
 				}
 			}
@@ -1288,24 +1291,41 @@ function lookupOnType(t, name) { // type X string -> type[]
 // 		Type-Type Compatibility
 // ----------------------------------
 
+function isIndirectType(t) {
+	switch (t.type) {
+		case 'reference':
+		case 'node':
+			return true
+		case 'value':
+			return t.value && typeof t.value === 'object'
+		default:
+			return false
+	}
+}
+
 var type2type_compatible = Object.create(null)
 var object2type_compatible = Object.create(null)
-function isTypeCompatible(input, output) {
+function isTypeCompatible(input, output, this_type) {
 	if (input.type === 'any' || output.type === 'any')
 		return true
 	if (input.type === 'value' && input.value === null)
 		return true
-	if (input.type === 'reference' || output.type === 'reference') {
-		var h = canonicalizeType(input) + "~" + canonicalizeType(output)
+	if (isIndirectType(input) || isIndirectType(output)) {
+		var h = canonicalizeType(input) + "~" + canonicalizeType(output) + "~" + canonicalizeType(this_type)
 		if (h in type2type_compatible)
 			return type2type_compatible[h]
 		type2type_compatible[h] = true
-		if (input.type === 'reference')
-			input = resolveTypeRef(input)
-		if (output.type === 'reference')
-			output = resolveTypeRef(output)
-		return type2type_compatible[h] = isTypeCompatible(input, output)
+		return type2type_compatible[h] = isTypeCompatibleX(input, output, this_type)
+	} else {
+		return isTypeCompatibleX(input, output, this_type)
 	}
+}
+
+function isTypeCompatibleX(input, output, this_type) {
+	if (input.type === 'reference')
+		input = resolveTypeRef(input)
+	if (output.type === 'reference')
+		output = resolveTypeRef(output)
 	switch (output.type) {
 		case 'object':
 			input = coerceTypeToObject(input)
@@ -1314,7 +1334,7 @@ function isTypeCompatible(input, output) {
 					for (var k in output.properties) {
 						var oprty = output.properties[k]
 						if (k in input.properties) {
-							if (!isTypeCompatible(input.properties[k].type, oprty.type)) {
+							if (!isTypeCompatible(input.properties[k].type, oprty.type, input)) {
 								return false
 							}
 						} else {
@@ -1333,7 +1353,10 @@ function isTypeCompatible(input, output) {
 				case 'value':
 					var v = coerceToObject(input.value)
 					if (v && typeof v === 'object') {
-						var h = canonicalizeType(v.key) + "~" + canonicalizeType(output)
+						var h = v.key + "~" + canonicalizeType(output)
+						if (output.calls.length > 0) {
+							h += "~" + canonicalizeType(this_type)
+						}
 						if (h in object2type_compatible)
 							return object2type_compatible[h]
 						object2type_compatible[h] = true
@@ -1343,7 +1366,7 @@ function isTypeCompatible(input, output) {
 							var inprty = obj.propertyMap.get(k)
 							if (inprty) {
 								if ('value' in inprty) {
-									if (!isTypeCompatible({type:'value', value:inprty.value}, oprty.type)) {
+									if (!isTypeCompatible({type:'value', value:inprty.value}, oprty.type, {type: 'value', value: v})) {
 										return object2type_compatible[h] = false
 									}
 								}
@@ -1353,6 +1376,11 @@ function isTypeCompatible(input, output) {
 								}
 							}
 						}
+						var callsOK = output.calls.all(function(oc) {
+							return isCallSatisfiedByObject(oc, this_type, v.key)
+						})
+						if (!callsOK)
+							return object2type_compatible[h] = false
 						return true
 					} else {
 						return false
@@ -1375,7 +1403,7 @@ function isTypeCompatible(input, output) {
 			if (vals.length === 0)
 				return true
 			return vals.some(function(v) {
-				return isTypeCompatible(input, {type: 'value', value: v})
+				return isTypeCompatible(input, {type: 'value', value: v}, this_type)
 			})
 		case 'void':
 			return true
@@ -1388,6 +1416,72 @@ function isTypeCompatible(input, output) {
 	}
 }
 
+
+var node2type_compatible = Object.create(null)
+function isNodeCompatible(node, output, this_type) {
+	if (arguments.length !== 3)
+		throw new Error("isNodeCompatible takes 3 arguments") // TODO: merge with isTypeCompatible and introduce proper 'node' type
+	node = node.rep()
+	if (node.type.any)
+		return true // fast return if node is any
+	if (output.type === 'reference') {
+		var h = node.id + "~" + canonicalizeType(output) + "~" + canonicalizeType(this_type)
+		if (node2type_compatible[h])
+			return node2type_compatible[h]
+		node2type_compatible[h] = true // assume true for nested occurrences of this judgement
+		return node2type_compatible[h] = isNodeCompatible(node, resolveTypeRef(output), this_type)
+	}
+	// TODO prototypes
+	switch (output.type) {
+		case 'object':
+			for (var k in output.properties) {
+				var inode = node.properties.get(k)
+				if (inode) {
+					if (!isNodeCompatible(inode, output.properties[k].type, {type: 'node', node: node})) {
+						return false
+					}
+				} else {
+					var isOK = node.type.some(function (t) {
+						return lookupOnType(t, k).some(function(t) {
+							return isTypeCompatible(t, output.properties[k].type, {type: 'node', node: node})
+						})
+					})
+					if (!isOK)
+						return false
+				}
+			}
+			var callsOK = output.calls.all(function(oc) {
+				// TODO: use tracked function value
+				return node.type.some(function(t) {
+					return isCallSatisfiedByType(oc, this_type, t)
+				})
+			})
+			if (!callsOK)
+				return false
+			// TODO: check indexers and brands
+			return true
+		case 'string':
+		case 'number':
+			return node.type.some(function(t) {
+				return isTypeCompatible(t, output, {type: 'any'})
+			})
+		case 'boolean':
+			return true // boolean type is sometimes used as a "boolean-like value" so we can't do a useful check here
+		case 'enum':
+			return node.type.some(function(t) {
+				return isTypeCompatible(t, output, {type: 'any'})
+			})
+		case 'void':
+			return true // it's ok to return something if void was expected
+		case 'any':
+			return true // everything satisfies any
+		case 'type-param':
+			return true // TODO type-param
+		default:
+			throw new Error("isNodeCompatible " + output.type)
+	}
+}
+
 function isCallSubtypeOf(incall, outcall) {
 	// TODO: type parameters
 	// TODO: variadic
@@ -1397,7 +1491,7 @@ function isCallSubtypeOf(incall, outcall) {
 		var iparm = incall.parameters[i]
 		if (i < outcall.parameters.length) {
 			var oparm = outcall.parameters[i]
-			if (!isTypeCompatible(oparm.type, iparm.type)) {
+			if (!isTypeCompatible(oparm.type, iparm.type, {type: 'any'})) {
 				return false
 			}
 		} else if (!iparm.optional) {
@@ -1406,7 +1500,7 @@ function isCallSubtypeOf(incall, outcall) {
 	}
 
 	// Check that return type from incall is a valid return type from outcall
-	return isTypeCompatible(incall.returnType, outcall.returnType)
+	return isTypeCompatible(incall.returnType, outcall.returnType, {type: 'any'})
 }
 
 // --------------------------
@@ -1562,7 +1656,7 @@ function isCallSatisfiedByType(call, this_type, t) {
 	switch (t.type) {
 		case 'value':
 			if (t.value && typeof t.value === 'object') {
-				return checkFunctionSig(call, t.value.key, this_type)
+				return isCallSatisfiedByObject(call, this_type, t.value.key)
 			} else {
 				return false
 			}
@@ -1593,7 +1687,10 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 	call_object_assumptions[h] = true
 
 	var fun = getFunction(fun_obj.function.id)
-	var unifier = fun.$unifier = new Unifier
+	if (!fun) {
+		console.warn("Function " + fun_obj.function.id + " appears to be missing")
+		return true
+	}
 	var unodes = []
 	function makeNode() {
 		var n = new UNode
@@ -1643,7 +1740,9 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 		getNode(e).type.add({type: 'any'})
 	}
 	function assumeType(e, t) {
-		if (t.type === 'value' && t.value && typeof t.value === 'object') {
+		if (t.type === 'node') {
+			unify(e, t.node)
+		} else if (t.type === 'value' && t.value && typeof t.value === 'object') {
 			unify(e, getConcreteObject(t.value.key))
 		} else {
 			getNode(e).type.add(t)
@@ -1735,7 +1834,11 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 				visitExpVoid(node.expression)
 				break;
 			case 'IfStatement':
-				visitExpVoid(node.condition)
+				visitExpVoid(node.test)
+				visitStmt(node.consequent)
+				if (node.alternate) {
+					visitStmt(node.alternate)
+				}
 				break;
 			case 'LabeledStatement':
 				visitStmt(node.body)
@@ -1820,7 +1923,7 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 				break;
 			case 'VariableDeclaration':
 				node.declarations.forEach(function(d) {
-					unify(getVar(d.id.name), d.id)
+					unify(getVar(d.id), d.id)
 					if (d.init) {
 						var p = visitExp(d.init, NOT_VOID)
 						if (p === NOT_NULL) {
@@ -2057,79 +2160,21 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 
 	if (program.ptsDot) {
 		var dotcode = pointsToDot(unodes)
-		console.log(dotcode)
-		process.exit(1)	
+		require('fs').writeFileSync(getFunctionPrettyName(fun) + ".dot", dotcode, 'utf8')
+		// console.log(dotcode)
+		// process.exit(1)	
 	}
 
 	// check return type
-	var node2type_compatible = Object.create(null)
-	function isNodeCompatible(node, output, this_type) {
-		if (arguments.length !== 3)
-			throw new Error("isNodeCompatible takes 3 arguments") // TODO: merge with isTypeComptabiel and introduce proper 'node' type
-		node = node.rep()
-		if (node.type.any)
-			return true // fast return if node is any
-		if (output.type === 'reference') {
-			var h = node.$index + "~" + canonicalizeType(output)
-			if (node2type_compatible[h])
-				return node2type_compatible[h]
-			node2type_compatible[h] = true // assume true for nested occurrences of this judgement
-			return node2type_compatible[h] = isNodeCompatible(node, resolveTypeRef(output))
-		}
-		// TODO prototypes
-		switch (output.type) {
-			case 'object':
-				for (var k in output.properties) {
-					var inode = node.properties.get(k)
-					if (inode) {
-						if (!isNodeCompatible(inode, output.properties[k].type, )) {
-							return false
-						}
-					} else {
-						return node.type.some(function (t) {
-							return lookupOnType(t, k).some(function(t) {
-								return isTypeCompatible(t, output.properties[k].type)
-							})
-						})
-					}
-				}
-				var callsOK = output.calls.all(function(oc) {
-					// TODO: use tracked function value
-					return node.type.some(function(t) {
-						return isCallSatisfiedByType(oc, this_type, t)
-					})
-				})
-				if (!callsOK)
-					return false
-				// TODO: check indexers and brands
-				return true
-			case 'string':
-			case 'number':
-				return node.type.some(function(t) {
-					return isTypeCompatible(t, output)
-				})
-			case 'boolean':
-				return true // boolean type is sometimes used as a "boolean-like value" so we can't do a useful check here
-			case 'enum':
-				return node.type.some(function(t) {
-					return isTypeCompatible(t, output)
-				})
-			case 'void':
-				return true // it's ok to return something if void was expected
-			case 'any':
-				return true // everything satisfies any
-			case 'type-param':
-				return true // TODO type-param
-			default:
-				throw new Error("isNodeCompatible " + output.type)
-		}
-	}
 	var returnNode = call.new ? getThis(fun) : getReturn(fun)
-	var isOK = isNodeCompatible(returnNode, call.returnType)
+	var isOK = isNodeCompatible(returnNode, call.returnType, {type: 'any'})
 
 	return call_object_assumptions[h] = isOK
 }
 
+function getFunctionPrettyName(f) {
+	return f.$function_id;
+}
 
 
 // ------------------------------------------------

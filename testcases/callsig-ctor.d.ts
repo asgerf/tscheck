@@ -1,8 +1,10 @@
 declare class Foo {
 	x: number;
 	y: string;
-	constructor(x:number)
+	constructor(x:number);
 
 	getX(): number;
-	// getY(): string;
+	getY(): string;
 }
+
+declare function numb(): number;
