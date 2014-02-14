@@ -1671,6 +1671,7 @@ function isCallSatisfiedByType(call, this_type, t) {
 	}
 }
 
+
 var call_object_assumptions = Object.create(null)
 function isCallSatisfiedByObject(call, this_type, fun_key) {
 	if (arguments.length !== 3)
