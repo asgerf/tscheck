@@ -1639,7 +1639,6 @@ if (sourceFileAst) {
 }
 
 
-
 function substituteParameterType(t) {
 	if (t.type === 'string-const') {
 		return {type: 'value', value: t.value}

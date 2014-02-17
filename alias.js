@@ -11,6 +11,8 @@ function UNode() {
 	this.id = ++unode_id
 	this.isTemp = false
 	this.depth = Infinity
+	this.cloneTarget = null
+	this.clonePhase = 0
 }
 UNode.prototype.rep = function() {
 	var p = this.parent
@@ -108,7 +110,26 @@ Unifier.prototype.complete = function() {
 
 var unifier = new Unifier;
 
+/*
+	type FunctionNode {
+		depth: int
+		parameters: UNode[]
+		return: UNode
+		this: UNode
+		calls: CallNode[]
+	}
+*/
 
+function FunctionNode(depth) {
+	this.depth = depth
+	this.parameters = []
+	this.return = null
+	this.this = null
+	this.calls = []
+}
+FunctionNode.prototype.clone = function() {
+
+}
 
 function aliasAnalysis(ast) {
 	
