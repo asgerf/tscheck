@@ -15,19 +15,35 @@ program.option('--compact', 'Report at most one violation per type path')
 	   .option('--pts-dot', 'Print graphviz dot for points-to graph')
 program.parse(process.argv);
 
-if (program.args.length < 2) {
+if (program.args.length === 0) {
 	program.help()
 }
 
+function fillExtension(path, ext) {
+	if (path.endsWith(ext))
+		return path
+	if (path.endsWith('.'))
+		return path + ext
+	return path + '.' + ext
+}
+function getArgumentWithExtension(ext) {
+	if (program.args.length === 1) {
+		var path = fillExtension(program.args[0], ext)
+		return fs.existsSync(path) ? path : null
+	} else {
+		return program.args.find(function(x) { return x.endsWith(ext) })
+	}
+}
+
 // usage: tscheck SNAPSHOT INTERACE
-var snapshotFile = program.args[0]
+var snapshotFile = getArgumentWithExtension('jsnap')
 var snapshotText = fs.readFileSync(snapshotFile, 'utf8');
 var snapshot = JSON.parse(snapshotText);
 
-var typeDeclFile = program.args[1];
+var typeDeclFile = getArgumentWithExtension('d.ts')
 var typeDeclText = fs.readFileSync(typeDeclFile, 'utf8');
 
-var sourceFile = program.args[2] || null;
+var sourceFile = getArgumentWithExtension('js')// program.args[2] || null;
 var sourceFileAst;
 if (sourceFile) {
 	var sourceFileText = fs.readFileSync(sourceFile, 'utf8')
@@ -444,6 +460,7 @@ determineEnums();
 // 		 ToObject Coercion
 // ------------------------------------------------------------
 
+var ObjectPrototype = lookupPath("Object.prototype");
 var NumberPrototype = lookupPath("Number.prototype");
 var StringPrototype = lookupPath("String.prototype");
 var BooleanPrototype = lookupPath("Boolean.prototype");
@@ -969,10 +986,20 @@ function formatValue(value, depth) {
 	if (typeof depth === 'undefined')
 		depth = 1;
 	if (typeof value === 'object' && value !== null) {
-		if (depth <= 0)
-			return value.function ? '[Function]' : '[Object]'
-		var fn = value.function ? 'Function ' : ''
-		return fn + '{ ' + lookupObject(value.key).properties.map(function(prty) { return prty.name + ': ' + formatValue(prty.value,depth-1) }).join(', ') + ' }'
+		switch (value.key) {
+			case ObjectPrototype.key: 	return "Object.prototype"
+			case FunctionPrototype.key: return "Function.prototype"
+			case StringPrototype.key: 	return "String.prototype"
+			case NumberPrototype.key: 	return "Number.prototype"
+			case BooleanPrototype.key: 	return "Boolean.prototype"
+			case snapshot.global: 		return "<global>"
+			default:
+				var obj = lookupObject(value.key)
+				if (depth <= 0)
+					return obj.function ? '[Function]' : '[Object]'
+				var fn = obj.function ? 'Function ' : ''
+				return fn + '{ ' + obj.properties.map(function(prty) { return prty.name + ': ' + formatValue(prty.value,depth-1) }).join(', ') + ' }'
+		}
 	} else {
 		return util.inspect(value)
 	}
@@ -1047,6 +1074,7 @@ function UNode() {
 	this.type = new UnionType
 	this.prototypes = Object.create(null)
 	this.id = ++unode_id
+	this.called = false
 }
 UNode.prototype.rep = function() {
 	var p = this.parent
@@ -1100,6 +1128,7 @@ Unifier.prototype.unify = function(n1, n2) {
 	n2.prototypes = null
 	n1.id = ++unode_id
 	n2.id = null
+	n1.called |= n2.called
 };
 Unifier.prototype.unifyPrty = function(n1, prty, n2) {
 	n1 = n1.rep()
@@ -1143,6 +1172,13 @@ var unifier = new Unifier;
 //
 // Returns the list of representative nodes, topologically sorted
 function computeSCCs(nodes) {  // see: http://en.wikipedia.org/wiki/Tarjan's_strongly_connected_components_algorithm
+
+	nodes.forEach(function(node) {
+		node = node.rep()
+		node.$scc_index = null
+		node.$scc_lowlink = null
+	})
+
 	var components = []
 	var index = 0
 	var stack = []
@@ -1670,7 +1706,6 @@ function isCallSatisfiedByType(call, this_type, t) {
 	}
 }
 
-
 var call_object_assumptions = Object.create(null)
 function isCallSatisfiedByObject(call, this_type, fun_key) {
 	if (arguments.length !== 3)
@@ -1681,10 +1716,12 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 	if (fun_obj.function.type !== 'user')
 		return true // can't check (TODO: check 'bind' functions)
 
-	var h = fun_key + "~" + canonicalizeCall(call) + (call.new ? '' : ("~" + canonicalizeType(this_type)))
+	var h = fun_key + "~" + canonicalizeCall(call) //+ (call.new ? '' : ("~" + canonicalizeType(this_type)))
 	if (h in call_object_assumptions)
 		return call_object_assumptions[h]
 	call_object_assumptions[h] = true
+
+	// console.log(h)
 
 	var fun = getFunction(fun_obj.function.id)
 	if (!fun) {
@@ -1697,14 +1734,17 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 		unodes.push(n)
 		return n
 	}
+	var current_env_object = fun_obj.env.key
+	var current_env_boundary = fun
 	var astnode2unode = Object.create(null)
 	function getNode(x) {
 		if (x instanceof UNode)
 			return x.rep()
-		var n = astnode2unode[x.$id]
+		var h = x.$id + '-' + current_env_object
+		var n = astnode2unode[h]
 		if (n)
 			return n.rep()
-		return astnode2unode[x.$id] = makeNode()
+		return astnode2unode[h] = makeNode()
 	}
 	function unify(x) {
 		x = getNode(x)
@@ -1719,10 +1759,28 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 			return n.rep()
 		return astnode2env_node[fun.$id] = makeNode()
 	}
+	function getVarFromEnv(name) {
+		var e = current_env_object
+		while (e) {
+			var obj = lookupObject(e)
+			var prty = obj.propertyMap.get(name)
+			if (prty) {
+				if (prty.value && typeof prty.value === 'object')
+					return getConcreteObject(prty.value.key)
+				else
+					return getConcreteObject(e).getPrty(name)
+			}
+			e = obj.env && obj.env.key
+		}
+		return getConcreteObject(snapshot.global).getPrty(name)
+	}
 	function getVar(node) {
 		var name = node.name
 		var scope = getEnclosingScope(node)
 		while (scope.type !== 'Program' && !scope.$env.has(name)) {
+			if (scope === current_env_boundary) {
+				return getVarFromEnv(name)
+			}
 			scope = getEnclosingScope(scope.$parent)
 		}
 		return getEnv(scope).getPrty(name)
@@ -1743,6 +1801,9 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 		if (t.type === 'node') {
 			unify(e, t.node)
 		} else if (t.type === 'value' && t.value && typeof t.value === 'object') {
+			if (!t.value.key) {
+				console.dir(t.value)
+			}
 			unify(e, getConcreteObject(t.value.key))
 		} else {
 			getNode(e).type.add(t)
@@ -1756,10 +1817,12 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 	// getConcreteObject(x) maps an object key to a union-find node
 	var concrete_objects = Object.create(null)
 	function getConcreteObject(x) {
+		if (typeof x !== 'number')
+			throw new Error("getConcreteObject was given non-number: " + x)
 		var n = concrete_objects[x]
 		if (!n) {
 			concrete_objects[x] = n = makeNode()
-			assumeType(n, {type: 'value', value: {key: x}})
+			n.type.add({type: 'value', value: {key: x}})
 		} else {
 			n = n.rep()
 		}
@@ -1769,55 +1832,85 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 	// We create union-find nodes for every variable in the environment
 	// Their type is bound to the value held in the environment object,
 	// and variables pointing to the same object are unified
-	function visitEnvObjects() {
-		var scope = getEnclosingScope(fun.$parent)
-		var e = fun_obj.env
-		while (e) {
-			var obj = lookupObject(e.key)
-			scope.$env.forEach(function(name) {
-				var node = getEnv(scope).getPrty(name)
-				var prty = obj.propertyMap.get(name)
-				if (prty && 'value' in prty) {
-					assumeType(node, {type: 'value', value:prty.value})
-				}
-			})
-			e = obj.env
-			scope = getEnclosingScope(scope.$parent)
+	// function visitEnvObjects() {
+	// 	var scope = getEnclosingScope(fun.$parent)
+	// 	var e = fun_obj.env
+	// 	while (e) {
+	// 		var obj = lookupObject(e.key)
+	// 		scope.$env.forEach(function(name) {
+	// 			var node = getEnv(scope).getPrty(name)
+	// 			var prty = obj.propertyMap.get(name)
+	// 			if (prty && 'value' in prty) {
+	// 				assumeType(node, {type: 'value', value:prty.value})
+	// 			}
+	// 		})
+	// 		e = obj.env
+	// 		scope = getEnclosingScope(scope.$parent)
+	// 	}
+	// }
+	// visitEnvObjects()
+
+	var visited_functions = Object.create(null)
+	function visitFunction(fun, self_key, receiver_node, env_key) {
+		var h = fun.$id + "~" + env_key
+		if (visited_functions[h])
+			return false
+		visited_functions[h] = true
+		var old = {obj: current_env_object, bound: current_env_boundary}
+		current_env_object = env_key
+		current_env_boundary = fun
+
+		for (var i=0; i<fun.params.length; i++) {
+			unify(fun.params[i], getVar(fun.params[i]), getSelf(fun).getPrty("@@" + i))
 		}
+		unify(getThis(fun), getSelf(fun).getPrty("@@this"), receiver_node)
+		unify(getSelf(fun), getConcreteObject(self_key))
+		unify(getReturn(fun), getSelf(fun).getPrty("@@return"))
+		if (fun.type === 'FunctionExpression' && fun.id) {
+			unify(fun.id, getVar(fun.id), getSelf(fun))
+		}
+		// assumeType(getThis(fun), {type: 'value', value: {key: receiver_node}})
+		// assumeType(getSelf(fun), {type: 'value', value: {key: self_key}})
+
+		visitStmt(fun.body)
+
+		current_env_object = old.obj
+		current_env_boundary = old.bound
+
+		return true
 	}
-	visitEnvObjects()
 
 	// We use the types from the call signature on the parameters
 	// FIXME: type parameters (either replace type-params by their bounds, or handle them directly)
 	// FIXME: variadic functions
-	function visitParameters() {
-		for (var i=0; i<fun.params.length; i++) {
-			unify(fun.params[i], getVar(fun.params[i]))
-			if (i < call.parameters.length) {
-				assumeType(fun.params[i], substituteParameterType(call.parameters[i].type))
-			} else {
-				assumeType(fun.params[i], {type: 'value', value: undefined})
-			}
-		}
-	}
-	visitParameters()
+	// function visitParameters() {
+	// 	for (var i=0; i<fun.params.length; i++) {
+	// 		unify(fun.params[i], getVar(fun.params[i]))
+	// 		if (i < call.parameters.length) {
+	// 			assumeType(fun.params[i], substituteParameterType(call.parameters[i].type))
+	// 		} else {
+	// 			assumeType(fun.params[i], {type: 'value', value: undefined})
+	// 		}
+	// 	}
+	// }
+	// visitParameters()
 
-	// Assign a value to this and the function name
-	function visitFunctionStuff() {
-		assumeType(getSelf(fun), {type: 'value', value: {key: fun_key}})
-		if (fun.type === 'FunctionExpression' && fun.id) {
-			unify(fun.id, getVar(fun.id.name), getSelf(fun))
-		}
-		if (call.new) {
-			var protoPrty = fun_obj.propertyMap.get("prototype")
-			if (protoPrty && protoPrty.value && typeof protoPrty.value === 'object') {
-				addPrototype(getThis(fun), protoPrty.value.key)
-			}
-		} else {
-			assumeType(getThis(fun), this_type)
-		}
-	}
-	visitFunctionStuff()
+	// // Assign a value to this and the function name
+	// function visitFunctionStuff() {
+	// 	assumeType(getSelf(fun), {type: 'value', value: {key: fun_key}})
+	// 	if (fun.type === 'FunctionExpression' && fun.id) {
+	// 		unify(fun.id, getVar(fun.id.name), getSelf(fun))
+	// 	}
+	// 	if (call.new) {
+	// 		var protoPrty = fun_obj.propertyMap.get("prototype")
+	// 		if (protoPrty && protoPrty.value && typeof protoPrty.value === 'object') {
+	// 			addPrototype(getThis(fun), protoPrty.value.key)
+	// 		}
+	// 	} else {
+	// 		assumeType(getThis(fun), this_type)
+	// 	}
+	// }
+	// visitFunctionStuff()
 
 	var NULL = true
 	var NOT_NULL = false
@@ -1855,7 +1948,7 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 				visitExp(node.discriminant, NOT_VOID)
 				node.cases.forEach(function(c) {
 					if (c.test) {
-						visitExpVoid(c.text, NOT_VOID)
+						visitExpVoid(c.test, NOT_VOID)
 					}
 					c.consequent.forEach(visitStmt)
 				})
@@ -1901,7 +1994,7 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 				if (node.update) {
 					visitExpVoid(node.update)
 				}
-				visitExp(node.body)
+				visitStmt(node.body)
 				break;
 			case 'ForInStatement':
 				var lv;
@@ -1942,11 +2035,12 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 	function visitExp(node, void_ctx) {
 		switch (node.type) {
 			case 'ArrayExpression':
+				var n = getNode(node)
 				node.elements.forEach(function(elm, i) {
 					if (!elm)
 						return
 					visitExp(elm, NOT_VOID)
-					unifyPrty(node, String(i), elm)
+					unify(elm, n.getPrty(String(i))) // TODO array entries
 				})
 				addPrototype(node, lookupPath("Array.prototype").key)
 				return NOT_NULL
@@ -2001,6 +2095,10 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 					case 'typeof':
 						visitExp(node.argument, VOID)
 						assumeType(node, {type: 'string'})
+						break;
+					case 'delete':
+						visitExp(node.argument, VOID)
+						assumeType(node, {type: 'boolean'})
 						break;
 					default:
 						throw new Error("Unknown unary operator: " + node.operator)
@@ -2106,9 +2204,28 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 				}
 				return NOT_NULL
 			case 'NewExpression':
-				return NOT_NULL; // TODO
+				visitExp(node.callee)
+				unify(node, getNode(node.callee).getPrty("@@this"), getNode(node.callee).getPrty("prototype"))
+				for (var i=0; i<node.arguments.length; i++) {
+					visitExp(node.arguments[i])
+					unify(getNode(node.callee).getPrty("@@" + i), node.arguments[i])
+				}
+				getNode(node.callee).called = true
+				return NOT_NULL
 			case 'CallExpression':
-				return NOT_NULL; // TODO
+				visitExp(node.callee)
+				if (node.callee.type === 'MemberExpression') {
+					unify(node.callee.object, getNode(node.callee).getPrty("@@this"))
+				} else {
+					assumeType(getNode(node.callee).getPrty("@@this"), {type: 'value', value: {key: snapshot.global}})
+				}
+				for (var i=0; i<node.arguments.length; i++) {
+					visitExp(node.arguments[i])
+					unify(getNode(node.callee).getPrty("@@" + i), node.arguments[i])
+				}
+				unify(node, getNode(node.callee).getPrty("@@return"))
+				getNode(node.callee).called = true
+				return NOT_NULL
 			case 'MemberExpression':
 				visitExp(node.object, NOT_VOID)
 				if (node.computed) {
@@ -2127,7 +2244,11 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 				unify(node, getVar(node))
 				return NOT_NULL
 			case 'Literal':
-				assumeType(node, {type: 'value', value: node.value})
+				if (node.value instanceof RegExp) {
+					assumeType(node, {type: 'reference', name: 'RegExp', typeArguments: []})
+				} else {
+					assumeType(node, {type: 'value', value: node.value})
+				}
 				return node.value === null ? NULL : NOT_NULL
 			case 'ThisExpression':
 				unify(node, getThis(getEnclosingFunction(node)))
@@ -2137,36 +2258,125 @@ function isCallSatisfiedByObject(call, this_type, fun_key) {
 		}
 	}
 	
-	visitStmt(fun.body)
-
+	var receiver_node = makeNode()
+	assumeType(receiver_node, this_type)
+	visitFunction(fun, fun_key, receiver_node, fun_obj.env.key)
 	unifier.complete()
 
-	// add all nodes to list (those created by getPrty) and discard non-root nodes from list
-	var newlist = []
-	function addNodeToList(node) {
-		node = node.rep()
-		if ('$index' in node)
-			return
-		node.$index = newlist.length
-		newlist.push(node)
-		node.properties.forEach(function(name,dst) {
-			addNodeToList(dst)
-		})
+	function applyParamTypes() {
+		for (var i=0; i<fun.params.length; i++) {
+			if (i < call.parameters.length) {
+				assumeType(fun.params[i], call.parameters[i].type)
+			} else {
+				assumeType(fun.params[i], {type: 'value', value: undefined})
+			}
+		}
 	}
-	unodes.forEach(addNodeToList)
-	unodes = newlist // discard non-root elements
+	applyParamTypes()
 
-	propagateTypes(unodes)
+	var changed = true
+	while (changed) {
+		changed = false
+		// add all nodes to list (those created by getPrty) and discard non-root nodes from list
+		var newlist = []
+		var inlist = Object.create(null)
+		function addNodeToList(node) {
+			node = node.rep()
+			if (inlist[node.id])
+				return
+			inlist[node.id] = true
+			newlist.push(node)
+			node.properties.forEach(function(name,dst) {
+				addNodeToList(dst)
+			})
+		}
+		unodes.forEach(addNodeToList)
+		unodes = newlist // discard non-root elements
+
+		propagateTypes(unodes)
+
+		unodes.forEach(function(node) {
+			if (node.called) {
+				node.type.forEach(function(t) {
+					if (t.type === 'value' && t.value && typeof t.value === 'object') {
+						var obj = lookupObject(t.value.key)
+						if (obj.function && obj.function.type === 'user') {
+							changed |= visitFunction(getFunction(obj.function.id), t.value.key, node.getPrty("@@this"), obj.env.key)
+						}
+					} else {
+						// TODO: call signatures
+					}
+				})
+			}
+		})
+		unifier.complete()
+	}
+
+	var returnNode = call.new ? getThis(fun) : getReturn(fun)
+
+	// function buildPredecessorMap() {
+	// 	var preds = new Map
+	// 	unodes.forEach(function(node) {
+	// 		node = node.rep()
+	// 		if (preds[node.id])
+	// 			return
+	// 		var list = preds[node.id] = []
+	// 		node.properties.forEach(function(name,dst) {
+	// 			list.push(dst)
+	// 		})
+	// 	})
+	// 	return preds
+	// }
+	// var predecessors = buildPredecessorMap()
+
+	// function demandOnType(t, name) {
+	// 	t = coerceTypeToObject(t)
+	// 	if (t.type === 'reference')
+	// 		t = resolveTypeRef(t)
+	// 	if (t.type !== 'object')
+	// 		return null
+	// 	var prty = t.properties[name]
+	// 	if (prty) {
+	// 		return prty.type
+	// 	}
+	// 	if (t.numberIndexer && isNumberString(name))
+	// 		return t.numberIndexer
+	// 	if (t.stringIndexer)
+	// 		return t.stringIndexer
+	// 	return null
+	// }
+
+	// var type_demands = Object.create(null)
+	// var effect_demands = Object.create(null)
+	// function propagateTypeDemand(node, typ) {
+	// 	node = node.rep()
+	// 	var h = node.id + '-' + canonicalizeType(typ)
+	// 	if (h in type_demands)
+	// 		return
+	// 	type_demands[h] = true
+	// 	node.needType = true
+	// 	node.properties.forEach(function(name,dst) {
+	// 		demandOnType(dst, t)
+	// 	})
+	// 	propagateEffectDemand(node)
+	// }
+	// function propagateEffectDemand(node) {
+	// 	node = node.rep()
+	// 	if (node.needEffect)
+	// 		return
+	// 	node.needEffect = true
+	// 	predecessors.get(node).forEach(function(pred) {
+	// 		propagateEffectDemand(pred)
+	// 	})
+	// }
+	// propagateTypeDemand(returnNode)
 
 	if (program.ptsDot) {
 		var dotcode = pointsToDot(unodes)
 		require('fs').writeFileSync(getFunctionPrettyName(fun) + ".dot", dotcode, 'utf8')
-		// console.log(dotcode)
-		// process.exit(1)	
 	}
 
 	// check return type
-	var returnNode = call.new ? getThis(fun) : getReturn(fun)
 	var isOK = isNodeCompatible(returnNode, call.returnType, {type: 'any'})
 
 	return call_object_assumptions[h] = isOK
@@ -2203,10 +2413,10 @@ function pointsToDot(nodes) {
 	}
 	println("digraph {")
 	nodes.forEach(function(node) {
-		println("  " + node.$index + ' [shape=box,label="' + escapeLabel(formatUnionType(node.type)) +  '"]')
+		println("  " + node.id + ' [shape=box,label="' + escapeLabel(formatUnionType(node.type)) +  '"]')
 		node.properties.forEach(function(name, dst) {
 			dst = dst.rep()
-			println("  " + node.$index + " -> " + dst.$index + " [label=\"" + escapeLabel(name) + "\"]")
+			println("  " + node.id + " -> " + dst.id + " [label=\"" + escapeLabel(name) + "\"]")
 		})
 	})
 	println("}")
