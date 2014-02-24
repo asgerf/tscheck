@@ -1,4 +1,55 @@
 
+/*
+	Node {
+		input: Set[Type],
+		output: Set[Type]
+	}
+*/
+
+function TypeSet() {
+}
+TypeSet.prototype.add = function(typ) {
+	var h = canonicalizeType(typ)
+	if (h in this)
+		return false
+	this[h] = typ
+	return true
+}
+TypeSet.prototype.forEach = function(fn) {
+	for (var k in this) {
+		if (this.hasOwnProperty(k)) {
+			fn(this[k])
+		}
+	}
+}
+TypeSet.prototype.addAll = function(ts) {
+	var ch = false
+	for (var k in ts) {
+		if (!(k in this)) {
+			this[k] = ts[k]
+			ch = true
+		}
+	}
+	return ch
+}
+TypeSet.prototype.propagateMembersTo = function(otherSet, prty) {
+	var totalCh = false // true if this set changed
+	var iterCh;			// true if changed during current iteration (if otherSet===this)
+	do {
+		iterCh = false
+		for (var k in this) {
+			if (this.hasOwnProperty(k)) {
+				var t = lookupPrtyOnType(this[k], prty)
+				if (t) {
+					iterCh |= otherSet.add(k)
+				}
+			}
+		}	
+		totalCh |= iterCh
+	} while (iterCh && otherSet === this);
+	return totalCh
+}
+
 // ----------------------
 // 		UNION-FIND
 // ----------------------
@@ -9,10 +60,8 @@ function UNode() {
 	this.rank = 0
 	this.properties = new Map
 	this.id = ++unode_id
-	this.isTemp = false
-	this.depth = Infinity
-	this.cloneTarget = null
-	this.clonePhase = 0
+	this.input = new TypeSet
+	this.output = new TypeSet
 }
 UNode.prototype.rep = function() {
 	var p = this.parent
@@ -26,14 +75,10 @@ UNode.prototype.getPrty = function(name) {
 	if (!n) {
 		n = new UNode
 		r.properties.put(name, n)
+		this.input.propagateMembersTo(n.input, name)
+		this.output.propagateMembersTo(n.output, name)
 	}
 	return n
-}
-UNode.prototype.assignDepth = function(d) {
-	var r = this.rep()
-	if (d < r.depth) {
-		r.depth = d
-	}
 }
 
 
@@ -63,13 +108,10 @@ Unifier.prototype.unify = function(n1, n2) {
 			n1.properties[k] = p2
 		}
 	}
-	n2.properties = null
+	n1.input.addAll(n2.input)
+	n1.output.addAll(n2.output)
 	n1.id = Math.min(n1.id, n2.id)
-	n1.isTemp = n1.isTemp && n2.isTemp
-	if (n1.depth != n2.depth) {
-		n1.depth = Math.min(n1.depth, n2.depth)
-		this.propagateDepth(n1)
-	}
+	n2.input = n2.output = n2.properties = null
 };
 Unifier.prototype.unifyPrty = function(n1, prty, n2) {
 	n1 = n1.rep()
@@ -82,6 +124,27 @@ Unifier.prototype.unifyPrty = function(n1, prty, n2) {
 		n1.properties[k] = n2
 	}
 };
+Unifier.prototype.propagateTypes = function(node) {
+	node = node.rep()
+	node.properties.forEach(function(prty, dst) {
+		var ch = false
+		ch |= node.input.propagateMembersTo(dst.input, prty)
+		ch |= node.output.propagateMembersTo(dst.output, prty)
+		if (ch) {
+			this.propagateTypes(dst)
+		}
+	})
+}
+Unifier.prototype.propagateType = function(node, io, typ) {
+	if (!typ)
+		return
+	node = node.rep()
+	if (node[io].add(typ)) {
+		node.properties.forEach(function(prty, dst) {
+			this.propagateType(dst, io, lookupPrtyOnType(typ, prty))
+		})
+	}
+}
 
 Unifier.prototype.unifyLater = function(n1, n2) {
 	if (n1 !== n2) {
@@ -89,18 +152,15 @@ Unifier.prototype.unifyLater = function(n1, n2) {
 		this.queue.push(n2)
 	}
 }
-Unifier.prototype.propagateDepth = function(n) {
-	n = n.rep()
-	for (var k in n.properties) {
-		var p = n.properties[k].rep()
-		if (p.depth > n.depth) {
-			p.depth = n.depth
-			propagateDepth(p)
-		}
-	}
-}
 
 Unifier.prototype.complete = function() {
+	for (var i=0; i<nodes.length; i++) {
+		var n = nodes[i];
+		if (n.parent !== n) {
+			nodes[i] = nodes[nodes.length-1]
+			nodes.length--;
+		}
+	}
 	while (this.queue.length > 0) {
 		var n1 = this.queue.pop()
 		var n2 = this.queue.pop()
