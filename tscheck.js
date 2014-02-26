@@ -1007,60 +1007,53 @@ function formatValue(value, depth) {
 
 
 // ----------------------
-// 		UNION TYPES
+// 		TYPE SETS
 // ----------------------
 
-function UnionType() {
-	this.any = false
-	this.table = Object.create(null)
+function TypeSet() {
 }
-UnionType.prototype.add = function(t) {
-	if (this.any)
+TypeSet.prototype.add = function(typ) {
+	var h = canonicalizeType(typ)
+	if (h in this)
 		return false
-	if (t.type === 'any') {
-		this.any = true
-		this.table = null
-		return true
-	}
-	var h = canonicalizeType(t)
-	if (h in this.table)
-		return false
-	this.table[h] = t
+	this[h] = typ
 	return true
 }
-UnionType.prototype.consume = function(ut) {
-	if (this.any)
-		return
-	if (ut.any) {
-		this.any = true
-		this.table = null
-		return
-	}
-	for (var k in ut.table) {
-		this.table[k] = ut.table[k]
-	}
-}
-UnionType.prototype.some = function(f) {
-	if (this.any)
-		return f({type: 'any'})
-	var table = this.table
-	for (var k in table) {
-		if (f(table[k])) {
-			return true
+TypeSet.prototype.forEach = function(fn) {
+	for (var k in this) {
+		if (this.hasOwnProperty(k)) {
+			fn(this[k])
 		}
 	}
-	return false
 }
-UnionType.prototype.forEach = function(f) {
-	if (this.any) {
-		f({type: 'any'})
-		return
+TypeSet.prototype.addAll = function(ts) {
+	var ch = false
+	for (var k in ts) {
+		if (!(k in this)) {
+			this[k] = ts[k]
+			ch = true
+		}
 	}
-	var table = this.table
-	for (var k in table) {
-		f(table[k])
-	}
+	return ch
 }
+TypeSet.prototype.propagateMembersTo = function(otherSet, prty) {
+	var totalCh = false // true if this set changed
+	var iterCh;			// true if changed during current iteration (if otherSet===this)
+	do {
+		iterCh = false
+		for (var k in this) {
+			if (this.hasOwnProperty(k)) {
+				var t = lookupPrtyOnType(this[k], prty)
+				if (t) {
+					iterCh |= otherSet.add(k)
+				}
+			}
+		}	
+		totalCh |= iterCh
+	} while (iterCh && otherSet === this);
+	return totalCh
+}
+
 
 // ----------------------
 // 		UNION-FIND
@@ -1071,7 +1064,8 @@ function UNode() {
 	this.parent = this
 	this.rank = 0
 	this.properties = new Map
-	this.type = new UnionType
+	this.input = new TypeSet
+	this.output = new TypeSet
 	this.prototypes = Object.create(null)
 	this.id = ++unode_id
 	this.called = false
@@ -1126,7 +1120,7 @@ Unifier.prototype.unify = function(n1, n2) {
 	n2.properties = null
 	n2.type = null
 	n2.prototypes = null
-	n1.id = ++unode_id
+	n1.id = Math.min(n1.id, n2.id)
 	n2.id = null
 	n1.called |= n2.called
 };
@@ -1683,6 +1677,25 @@ function substituteParameterType(t) {
 	}
 }
 
+function FunctionNode(num_params) {
+	this.parameters = []
+	for (var i=0; i<num_params; i++) {
+		this.parameters.push(new UNode)
+	}
+	this.return = new UNode
+	this.this = new UNode
+	this.calls = []
+}
+
+function CallNode(num_args) {
+	this.arguments = []
+	for (var i=0; i<this.arguments.length; i++) {
+		this.arguments.push(new UNode)
+	}
+	this.return = new UNode
+	this.this = new UNode
+}
+
 function isCallSatisfiedByType(call, this_type, t) {
 	if (arguments.length !== 3)
 		throw new Error("isCallSatisfiedByType takes 3 arguments")
@@ -1704,7 +1717,7 @@ function isCallSatisfiedByType(call, this_type, t) {
 		default:
 			return false
 	}
-}
+} 
 
 var call_object_assumptions = Object.create(null)
 function isCallSatisfiedByObject(call, this_type, fun_key) {

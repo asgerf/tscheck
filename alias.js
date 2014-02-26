@@ -80,6 +80,10 @@ UNode.prototype.getPrty = function(name) {
 	}
 	return n
 }
+UNode.prototype.unify = function(other) {
+	unifier.unify(this, other)
+	unifier.complete()
+}
 
 
 function Unifier() {
@@ -154,13 +158,6 @@ Unifier.prototype.unifyLater = function(n1, n2) {
 }
 
 Unifier.prototype.complete = function() {
-	for (var i=0; i<nodes.length; i++) {
-		var n = nodes[i];
-		if (n.parent !== n) {
-			nodes[i] = nodes[nodes.length-1]
-			nodes.length--;
-		}
-	}
 	while (this.queue.length > 0) {
 		var n1 = this.queue.pop()
 		var n2 = this.queue.pop()
