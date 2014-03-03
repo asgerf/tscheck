@@ -1014,26 +1014,49 @@ function formatValue(value, depth) {
 
 
 // ----------------------
-// 		TYPE SETS
+// 		HASH SETS
 // ----------------------
 
-function TypeSet() {
+function HashSet() {
 }
-TypeSet.prototype.add = function(typ) {
-	var h = canonicalizeType(typ)
+HashSet.prototype.add = function(x) {
+	var h = this.hash(x)
 	if (h in this)
 		return false
-	this[h] = typ
+	this[h] = x
 	return true
 }
-TypeSet.prototype.forEach = function(fn) {
+HashSet.prototype.has = function(x) {
+	return this.hash(x) in this
+}
+HashSet.prototype.some = function(fn) {
+	for (var k in this) {
+		if (this.hasOwnProperty(k)) {
+			if (fn(this[k])) {
+				return true
+			}
+		}
+	}
+	return false
+}
+HashSet.prototype.all = function(fn) {
+	for (var k in this) {
+		if (this.hasOwnProperty(k)) {
+			if (!fn(this[k])) {
+				return false
+			}
+		}
+	}
+	return true
+}
+HashSet.prototype.forEach = function(fn) {
 	for (var k in this) {
 		if (this.hasOwnProperty(k)) {
 			fn(this[k])
 		}
 	}
 }
-TypeSet.prototype.addAll = function(ts) {
+HashSet.prototype.addAll = function(ts) {
 	var ch = false
 	for (var k in ts) {
 		if (!(k in this)) {
@@ -1043,8 +1066,8 @@ TypeSet.prototype.addAll = function(ts) {
 	}
 	return ch
 }
-TypeSet.prototype.clone = function() {
-	var r = new TypeSet
+HashSet.prototype.clone = function() {
+	var r = Object.create(Object.getPrototype(this))
 	for (var k in this) {
 		if (this.hasOwnProperty(k)) {
 			r[k] = this[k]
@@ -1053,9 +1076,14 @@ TypeSet.prototype.clone = function() {
 	return r
 }
 
-// ----------------------
-// 		FUNCTION SET
-// ----------------------
+function TypeSet() {}
+TypeSet.prototype.hash = canonicalizeType
+TypeSet.prototype.isAny = function() {
+	return !!this.get({type:'any'})
+}
+
+function ValueSet() {}
+ValueSet.prototype.hash = canonicalizeValue
 
 function canonicalizeFunction(fun) {
 	switch (fun.type) {
@@ -1069,41 +1097,12 @@ function canonicalizeFunction(fun) {
 			return 'U'
 	}
 }
-function FunctionSet() {
-}
-FunctionSet.prototype.add = function(f) {
-	var h = canonicalizeFunction(f)
-	if (h in this)
-		return false
-	this[h] = f
-	return true
-}
-FunctionSet.prototype.forEach = function(fn) {
-	for (var k in this) {
-		if (this.hasOwnProperty(k)) {
-			fn(this[k])
-		}
-	}
-}
-FunctionSet.prototype.addAll = function(ts) {
-	var ch = false
-	for (var k in ts) {
-		if (!(k in this)) {
-			this[k] = ts[k]
-			ch = true
-		}
-	}
-	return ch
-}
-FunctionSet.prototype.clone = function() {
-	var r = new FunctionSet
-	for (var k in this) {
-		if (this.hasOwnProperty(k)) {
-			r[k] = this[k]
-		}
-	}
-	return r
-}
+function FunctionSet() {}
+FunctionSet.prototype.hash = canonicalizeFunction
+
+function CallSigSet() {}
+CallSigSet.prototype.hash = canonicalizeCall
+
 
 // ----------------------
 // 		UNION-FIND
@@ -1128,10 +1127,10 @@ function Unifier() {
 		this.rank = 0
 		this.properties = new Map
 		this.id = ++unode_id
-		this.depth = Infinity
-		this.input = new TypeSet
-		this.output = new TypeSet
+		this.primitives = new TypeSet
 		this.functions = new FunctionSet
+		this.call_sigs = new CallSigSet
+		this.isObject = false
 		this.clone_phase = -1
 		this.clone_target = null
 	}
@@ -1146,19 +1145,6 @@ function Unifier() {
 		var n = r.properties.get(name)
 		if (!n) {
 			n = new UNode
-			n.depth = this.depth
-			this.input.forEach(function(t) {
-				lookupOnType(t,name).forEach(function(t2) {
-					n.input.add(t2)
-				})
-			})
-			this.output.forEach(function(t) {
-				if (t.type === 'enum')
-					return
-				lookupOnType(t,name).forEach(function(t2) {
-					n.output.add(t2)
-				})
-			})
 			r.properties.put(name, n)
 		}
 		return n
@@ -1170,9 +1156,10 @@ function Unifier() {
 		} else {
 			r.clone_phase = current_clone_phase
 			var target = r.clone_target = new UNode
-			target.input = r.input.clone()
-			target.output = r.output.clone()
+			target.primitives = r.primitives.clone()
 			target.functions = r.functions.clone()
+			target.call_sigs = r.call_sigs.clone()
+			target.isObject = r.isObject
 			r.properties.forEach(function(name,dst) {
 				target.properties.put(name, dst.clone())
 			})
@@ -1185,12 +1172,6 @@ function Unifier() {
 		n2 = n2.rep()
 		if (n1 === n2)
 			return
-		propagateDepth(n1, n2.depth)
-		propagateDepth(n2, n1.depth)
-		propagateInputTypes(n1, n2)
-		propagateInputTypes(n2, n1)
-		propagateOutputTypes(n1, n2)
-		propagateOutputTypes(n2, n1)
 		if (n2.rank > n1.rank) {
 			var z = n1; n1 = n2; n2 = z; // swap n1/n2 so n1 has the highest rank
 		}
@@ -1198,6 +1179,8 @@ function Unifier() {
 			n1.rank++
 		}
 		n2.parent = n1
+		
+		// merge properties
 		for (var k in n2.properties) {
 			if (k[0] !== '$')
 				continue
@@ -1209,10 +1192,18 @@ function Unifier() {
 				n1.properties[k] = p2
 			}
 		}
-		n2.input = null
-		n1.functions.addAll(n2.functions)
+
+		// merge other attributes
 		n1.id = Math.min(n1.id, n2.id)
-		n2.id = null
+		n1.functions.addAll(n2.functions)
+		n1.primitives.addAll(n2.primitives)
+		n1.call_sigs.addAll(n2.call_sigs)
+		n1.isObject |= n2.isObject
+		
+		// clean up
+		n2.functions = null
+		n2.primitives = null
+		n2.call_sigs = null
 	}
 
 	function unifyLater(n1, n2) {
@@ -1264,15 +1255,17 @@ function Unifier() {
 		call.self = this.self.clone()
 		return call
 	}
+
+	var ENV = '@env' // we hijack this property name for use as environment pointers (TODO: avoid name clash)
 	
 	var unresolved_calls = []
 	function resolveCallLater(call) {
 		unresolved_calls.push(call)
 	}
 
-	//////////////////////////
-	//			HEAP 		//
-	//////////////////////////
+	//////////////////////////////////////
+	//			HEAP -> U-NODES 		//
+	//////////////////////////////////////
 	var object2node = Object.create(null)
 	function getConcreteObject(key) {
 		return object2node[key]
@@ -1282,10 +1275,10 @@ function Unifier() {
 			if (!obj)
 				return
 			var n = object2node[i] = new UNode
+			n.isObject = true
 			if (obj.function) {
 				n.functions.add(obj.function)
 			}
-			n.depth = 0
 		})
 		snapshot.heap.forEach(function(obj,i) {
 			var n = object2node[i].rep()
@@ -1298,7 +1291,7 @@ function Unifier() {
 					if (prty.value && typeof prty.value === 'object') {
 						n.properties.put(name, object2node[prty.value.key])
 					} else {
-						n.getPrty(name).input.add({type:'value', value:prty.value})
+						n.getPrty(name).primitives.add({type: 'value', value:prty.value})
 					}
 				} else {
 					if (prty.getter) {
@@ -1320,117 +1313,19 @@ function Unifier() {
 		})
 		complete()
 	}
-	buildHeap()
-
-	//////////////////////////
-	// 		PROPAGATION		//
-	//////////////////////////
-	function propagateDepth(n, d) {
-		n = n.rep()
-		if (d < n.depth) {
-			n.depth = d
-			n.properties.forEach(function(name,dst) {
-				propagateDepth(dst, d)
-			})
+	function getNodeForValue(value) {
+		if (value && typeof value === 'object')
+			return getConcreteObject(value.key)
+		else {
+			var node = new UNode
+			node.primitives.add({type:'value', value:value})
 		}
 	}
+	buildHeap() // TODO: create heap lazily?
 
-	function propagateInputType(n, t) {
-		n = n.rep()
-		if (t.type === 'node') {
-			unifyLater(n, t.node)
-		}
-		else if (t.type === 'value' && t.value && typeof t.value === 'object') {
-			unifyLater(n, getConcreteObject(t.value.key))
-		}
-		else if (n.input.add(t)) {
-			n.properties.forEach(function(name,dst) {
-				lookupOnType(t,name).forEach(function(t2) {
-					propagateInputType(dst, t2)
-				})
-			})
-		}
-	}
-
-	var nodes_with_output = Object.create(null)
-	function propagateOutputType(n, t) {
-		n = n.rep()
-		nodes_with_output[n.id] = n
-		if (t.type === 'value')
-			throw new Error("Output types cannot be values")
-		if (n.output.add(t)) {
-			if (t.type === 'enum')
-				return // don't propagate properties of enum values
-			n.properties.forEach(function(name,dst) {
-				lookupOnType(t,name).forEach(function(t2) {
-					propagateOutputType(dst, t2)
-				})
-			})
-		}
-	}
-
-	function propagateInputTypes(src, dst) {
-		src = src.rep()
-		src.input.forEach(function(t) {
-			propagateInputType(dst, t)
-		})
-	}
-
-	function propagateOutputTypes(src, dst) {
-		src = src.rep()
-		src.output.forEach(function(t) {
-			propagateOutputType(dst, t)
-		})
-	}
-	
-	function lookupOnType(t, name) { // type X string -> type[]
-		t = coerceTypeToObject(t)
-		if (t.type === 'reference')
-			t = resolveTypeRef(t)
-		switch (t.type) {
-			case 'any': 
-				return [{type:'any'}]
-			case 'object':
-				var prty = t.properties[name]
-				if (prty) {
-					return [prty.type]
-				}
-				if (t.numberIndexer !== null && isNumberString(name)) {
-					return [t.numberIndexer]
-				}
-				if (t.stringIndexer !== null) {
-					return [t.stringIndexer]
-				}
-				return []
-			case 'enum':
-				var enumvals = enum_values.get(t.name)
-				if (enumvals.length === 0)
-					return [{type: 'any'}]
-				var keys = enumvals.map(function(v) {
-					v = coerceToObject(v)
-					if (v && typeof v === 'object')
-						return v.key
-					else
-						return null // removed by compact below
-				}).compact().unique()
-				var values = keys.map(function(key) {
-					var obj = lookupObject(key)
-					var prty = obj.propertyMap.get(name)
-					if (prty) {
-						return {type: 'node', node: getConcreteObject(key).getPrty(name)}
-					} else {
-						return null // removed by compact below
-					}
-				}).compact()
-				return values
-			default:
-				return []
-		}
-	}
-
-	//////////////////////////////////////
-	// 		AST -> FUNCTION NODE		//
-	//////////////////////////////////////
+	//////////////////////////////
+	// 		AST -> U-NODES		//
+	//////////////////////////////
 	var ast2node = Object.create(null)
 	function getNode(x) {
 		if (x instanceof UNode)
@@ -1442,7 +1337,6 @@ function Unifier() {
 			return ast2node[x.$id] = new UNode
 		}
 	}
-	var ENV = '@env' // we hijack this property name for use as environment pointers (TODO: avoid name clash)
 	function unify(x) {
 		x = getNode(x)
 		for (var i=1; i<arguments.length; i++) {
@@ -1841,6 +1735,54 @@ function Unifier() {
 	}
 
 
+	//////////////////////////////////
+	// 		TYPES -> U-NODES		//
+	//////////////////////////////////
+
+	function makeType(t) {
+		var type2node = Object.create(null)
+		function visit(t) {
+			switch (t.type) {
+				case 'reference':
+					var h = canonicalizeType(t)
+					if (h in type2node)
+						return type2node[h]
+					type2node[h] = new UNode
+					var n2 = visit(resolveTypeRef(t))
+					unify(n2, type2node[h])
+					return n2
+				case 'object':
+					var node = new UNode
+					for (var k in t.properties) {
+						node.properties.put(k, visit(t.properties[k].type))
+					}
+					t.calls.forEach(function(callsig) {
+						node.call_sigs.push(callsig)
+					})
+					// TODO: string indexers and number indexers
+					return node
+				case 'enum':
+					var node = new UNode
+					var enum_vals = enum_values.get(t.name)
+					if (enum_vals.length === 0) {
+						node.primitives.add({type:'any'})
+					} else {
+						enum_vals.forEach(function(v) {
+							unify(node, getNodeForValue(v))
+						})
+					}
+					return node
+				case 'node':
+					return t.node // NOTE: intended to be used to handle type parameters
+				default:
+					var node = new UNode
+					node.primitives.add(t)
+					return node
+			}
+		}
+		return visit(t)
+	}
+
 	//////////////////////////
 	//		  SOLVER		//
 	//////////////////////////
@@ -1885,74 +1827,82 @@ function Unifier() {
 		}
 	}
 
-	function augmentType(type, node) {
-		if (type.type === 'reference')
-			type = resolveTypeRef(type)
-		if (type.type !== 'object')
-			return type
-		var r = {
-			type: 'object',
-			properties: {},
-			calls: type.calls,
-			stringIndexer: type.stringIndexer,
-			numberIndexer: type.numberIndexer
-		}
-		for (var k in type.properties) {
-			r.properties[k] = type.properties[k]
-		}
-		node.properties.forEach(function(name,dst) {
-			r.properties[name] = {optional: false, type: {type: 'node', node:dst}}
-		})
-		return r
-	}
-
 	var node_type_compatible = Object.create(null)
-	function isNodeCompatibleWithType(node, out) {
+	function isNodeCompatibleWithType(node, type) {
 		node = node.rep()
-		var h = node.id + "~" + canonicalizeType(out)
+		var h = node.id + "~" + canonicalizeType(type)
 		if (h in node_type_compatible)
 			return node_type_compatible[h]
 		node_type_compatible[h] = true
-		return node_type_compatible[h] = isNodeCompatibleWithTypeX(node, out)
+		return node_type_compatible[h] = isNodeCompatibleWithTypeX(node, type)
 	}
-	function isNodeCompatibleWithTypeX(node, out) {
+	function isNodeCompatibleWithTypeX(node, type) {
 		node = node.rep()
-		if (out.type === 'reference')
-			out = resolveTypeRef(out)
-		switch (out.type) {
+		if (node.primitives.isAny())
+			return true
+		if (type.type === 'reference')
+			type = resolveTypeRef(type)
+		switch (type.type) {
 			case 'object':
-				var quotient_object = {type: 'object', properties: {}, calls: [], stringIndexer: null, numberIndexer: null}
-				var has_quotient = false
-				for (var k in out.properties) {
+				for (var k in type.properties) {
 					var dst = node.properties.get(k)
 					if (dst) {
-						if (!isNodeCompatibleWithType(dst, out.properties[k].type)) {
+						if (!isNodeCompatibleWithType(dst, type.properties[k].type)) {
 							return false
 						}
 					} else {
-						has_quotient = true
-						quotient_object.properties.push(out.properties[k])
+						if (!type.properties[k].optional)
+							return false
 					}
 				}
-				// TODO: check call signatures
-				// out.calls.forEach(function(sig) {
-
-				// })
-				if (quotient_object.properties.length > 0) {
-					var ok = node.input.some(function(t) {
-						return isTypeCompatibleWithType(quotient_object, t)
-					})
-					if (!ok)
-						return false
-				}
+				// TODO: call signatures, indexers, brands(?)
 				return true
 			case 'node':
-				return node === out.node
-			default:
-				// TODO
+				return node === type.node.rep()
+			case 'enum':
+				var enum_vals = enum_values.get(type.name)
+				if (enum_vals.length === 0) {
+					return true
+				}
+				return enum_vals.some(function(v) {
+					return isNodeCompatibleWithValue(node, v)
+				})
+			case 'any':
+			case 'void':
 				return true
+			case 'number':
+			case 'string':
+			case 'boolean':
+				if (node.primitives.has({type: type.type}))
+					return true
+				return node.primitives.some(function(t) {
+					return t.type === 'value' && typeof t.value === type.type
+				})
+			default:
+				throw new Error("Unexpected type: " + util.inspect(type))
 		}
 		return true
+	}
+	function isNodeCompatibleWithValue(node, v) {
+		node = node.rep()
+		if (v === null)
+			return true
+		if (v && typeof v === 'object')
+			return node === getConcreteObject(v.key)
+		if (node.primitives.has({type:'value', value:v}))
+			return true
+		switch (typeof v) {
+			case 'number':
+				return node.primitives.has({type:'number'})
+			case 'string':
+				return node.primitives.has({type:'string'})
+			case 'boolean':
+				return node.primitives.has({type:'boolean'})
+			case 'undefined':
+				return node.primitives.has({type:'void'})
+			default:
+				throw new Error("Unexpected value: " + util.inspect(v))
+		}
 	}
 	
 	//////////////////////////////////////
