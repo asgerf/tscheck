@@ -12,7 +12,7 @@ program.option('--compact', 'Report at most one violation per type path')
 	   .option('--suggest', 'Suggest additions to the interface')
 	   .option('--coverage', 'Print declaration file coverage')
 	   .option('--no-warn', 'Squelch type errors')
-	   .option('--pts-dot', 'Print graphviz dot for points-to graph')
+	   .option('--no-jsnap', 'Do not regenerate .jsnap file, even if older than .js file')
 program.parse(process.argv);
 
 if (program.args.length === 0) {
@@ -20,7 +20,7 @@ if (program.args.length === 0) {
 }
 
 function fillExtension(path, ext) {
-	if (path.endsWith(ext))
+	if (path.endsWith('.' + ext))
 		return path
 	if (path.endsWith('.'))
 		return path + ext
@@ -31,36 +31,90 @@ function getArgumentWithExtension(ext) {
 		var path = fillExtension(program.args[0], ext)
 		return fs.existsSync(path) ? path : null
 	} else {
-		return program.args.find(function(x) { return x.endsWith(ext) })
+		return program.args.find(function(x) { return x.endsWith('.' + ext) })
 	}
 }
-
-// usage: tscheck SNAPSHOT INTERACE
-var snapshotFile = getArgumentWithExtension('jsnap')
-var snapshotText = fs.readFileSync(snapshotFile, 'utf8');
-var snapshot = JSON.parse(snapshotText);
-
-var typeDeclFile = getArgumentWithExtension('d.ts')
-var typeDeclText = fs.readFileSync(typeDeclFile, 'utf8');
-
-var sourceFile = getArgumentWithExtension('js')// program.args[2] || null;
-var sourceFileAst;
-if (sourceFile) {
-	var sourceFileText = fs.readFileSync(sourceFile, 'utf8')
-	sourceFileAst = esprima.parse(sourceFileText, {loc:true})
-} else {
-	sourceFileAst = null
+function generateSnapshot(jsfile, jsnapfile, callback) {
+	console.log("Regenerating jsnap file " + jsnapfile + " from " + jsfile)
+	var spawn = require('child_process').spawn
+	var fd = fs.openSync(jsnapfile, 'w')
+	var proc = spawn('echo', [jsfile], ['ignore',fd,2])
+	proc.on('exit', function() {
+		fs.close(fd)
+	})
+	proc.on('close', function(code) {
+		if (code !== 0) {
+			console.err("jsnap failed with exit code " + code)
+			process.exit(1)
+		}
+		callback(jsnapfile)
+	})
+}
+function checkSnapshot(jsfile, jsnapfile, callback) {
+	if (jsnapfile === null) {
+		jsnapfile = fillExtension(program.args[0], 'jsnap')
+		generateSnapshot(jsfile, jsnapfile, callback)
+		return
+	}
+	var js_stat = fs.statSync(jsfile)
+	var jsnap_stat = fs.statSync(jsnapfile)
+	if (jsnap_stat.mtime >= js_stat.mtime) {
+		console.log("Reusing jsnap file " + jsnapfile)
+		callback(jsnapfile)
+		return
+	}
+	generateSnapshot(jsfile, jsnapfile, callback)
 }
 
-var libFile = __dirname + "/lib/lib.d.ts";
-var libFileText = fs.readFileSync(libFile, 'utf8');
+var load_handlers = []
+function onLoaded(fn) {
+	load_handlers.push(fn)
+}
 
-var LIB_ORIGIN = ">lib.d.ts"; // pad origin with ">" to ensure it does not collide with user input
 
-var typeDecl = tscore([
-		{file: LIB_ORIGIN, text:libFileText},
-		{file: typeDeclFile, text:typeDeclText}
-	])
+var snapshot, typeDecl, sourceFileAst;
+function initialize() {
+	var sourceFile = getArgumentWithExtension('js')// program.args[2] || null;
+	var typeDeclFile = getArgumentWithExtension('d.ts')
+	var snapshotFile = getArgumentWithExtension('jsnap')
+	if (program.jsnap) {
+		checkSnapshot(sourceFile, snapshotFile, loadInputs)
+	} else {
+		loadInputs();
+	}
+
+	function loadInputs(snapshotFile) {
+		// Load snapshot
+		var snapshotText = fs.readFileSync(snapshotFile, 'utf8');
+		snapshot = JSON.parse(snapshotText);
+
+		// Load TypeScript
+		var typeDeclText = fs.readFileSync(typeDeclFile, 'utf8');
+
+		var libFile = __dirname + "/lib/lib.d.ts";
+		var libFileText = fs.readFileSync(libFile, 'utf8');
+
+		var LIB_ORIGIN = ">lib.d.ts"; // pad origin with ">" to ensure it does not collide with user input
+
+		typeDecl = tscore([
+				{file: LIB_ORIGIN, text:libFileText},
+				{file: typeDeclFile, text:typeDeclText}
+			])
+
+		// Load source code
+		if (sourceFile) {
+			var sourceFileText = fs.readFileSync(sourceFile, 'utf8')
+			sourceFileAst = esprima.parse(sourceFileText, {loc:true})
+		} else {
+			sourceFileAst = null
+		}
+
+		load_handlers.forEach(function(fn) {
+			fn();
+		})
+	}
+}
+initialize()
 
 // -----------------------------------
 // 		Miscellaneous util stuff
@@ -203,7 +257,7 @@ function nameAllTypes() {
 		nameType(typeDecl.env[k].object, k)
 	}	
 }
-nameAllTypes()
+onLoaded(nameAllTypes)
 
 // ----------------------------------------------
 // 		 Type Parameter Substitution
@@ -420,7 +474,9 @@ function indexProperties(obj) {
 		}
 	})
 }
-snapshot.heap.forEach(indexProperties);
+onLoaded(function() {
+	snapshot.heap.forEach(indexProperties);
+})
 
 function lookupPath(path, e) {
 	e = e || function() { throw new Error("Missing value at " + path) }
@@ -456,17 +512,19 @@ function determineEnums() {
 		enum_values.put(qname, values);
 	}
 }
-determineEnums();
+onLoaded(determineEnums)
 
 // ------------------------------------------------------------
 // 		 ToObject Coercion
 // ------------------------------------------------------------
 
-var ObjectPrototype = lookupPath("Object.prototype");
-var NumberPrototype = lookupPath("Number.prototype");
-var StringPrototype = lookupPath("String.prototype");
-var BooleanPrototype = lookupPath("Boolean.prototype");
-var FunctionPrototype = lookupPath("Function.prototype");
+onLoaded(function() {
+	var ObjectPrototype = lookupPath("Object.prototype");
+	var NumberPrototype = lookupPath("Number.prototype");
+	var StringPrototype = lookupPath("String.prototype");
+	var BooleanPrototype = lookupPath("Boolean.prototype");
+	var FunctionPrototype = lookupPath("Function.prototype");	
+})
 
 function coerceToObject(x) {
 	switch (typeof x) {
@@ -1243,9 +1301,11 @@ function prepareAST(ast) {
 	injectEnvs(ast)
 }
 
-if (sourceFileAst) {
-	prepareAST(sourceFileAst)
-}
+onLoaded(function() {
+	if (sourceFileAst) {
+		prepareAST(sourceFileAst)
+	}	
+})
 
 function Analyzer() {
 	var queue = []
@@ -2320,4 +2380,4 @@ function main() {
 	}
 }
 
-main();
+onLoaded(main)
