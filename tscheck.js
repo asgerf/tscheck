@@ -390,6 +390,8 @@ function canonicalizeType(type) {
 			return 'W:' + canonicalizeValue(type.value);
 		case 'node':
 			return 'X:' + type.node.rep().id
+		case 'type-param':
+			return 'T:' + type.name
 		default:
 			throw new Error("Unrecognized type: " + util.inspect(type))
 	}
@@ -682,9 +684,14 @@ function checkCallSignature(call, receiverKey, functionKey, path) {
 		console.log(path + ": expected " + formatTypeCall(call) + " but found non-function object")
 		return
 	}
-	if (!isCallSatisfiedByObject(call, {type: 'value', value: {key: receiverKey}}, functionKey)) {
+	var analyzer = new Analyzer
+	var ok = analyzer.checkSignature(call, functionKey, receiverKey)
+	if (!ok) {
 		console.log(path + ": does not satisfy signature " + formatTypeCall(call))
 	}
+	// if (!isCallSatisfiedByObject(call, {type: 'value', value: {key: receiverKey}}, functionKey)) {
+	// 	console.log(path + ": does not satisfy signature " + formatTypeCall(call))
+	// }
 }
 
 // --------------------
@@ -1067,7 +1074,7 @@ HashSet.prototype.addAll = function(ts) {
 	return ch
 }
 HashSet.prototype.clone = function() {
-	var r = Object.create(Object.getPrototype(this))
+	var r = Object.create(Object.getPrototypeOf(this))
 	for (var k in this) {
 		if (this.hasOwnProperty(k)) {
 			r[k] = this[k]
@@ -1077,12 +1084,11 @@ HashSet.prototype.clone = function() {
 }
 
 function TypeSet() {}
+TypeSet.prototype = Object.create(HashSet.prototype)
 TypeSet.prototype.hash = canonicalizeType
-TypeSet.prototype.isAny = function() {
-	return !!this.get({type:'any'})
-}
 
 function ValueSet() {}
+ValueSet.prototype = Object.create(HashSet.prototype)
 ValueSet.prototype.hash = canonicalizeValue
 
 function canonicalizeFunction(fun) {
@@ -1098,1054 +1104,13 @@ function canonicalizeFunction(fun) {
 	}
 }
 function FunctionSet() {}
+FunctionSet.prototype = Object.create(HashSet.prototype)
 FunctionSet.prototype.hash = canonicalizeFunction
 
 function CallSigSet() {}
+CallSigSet.prototype = Object.create(HashSet.prototype)
 CallSigSet.prototype.hash = canonicalizeCall
 
-
-// ----------------------
-// 		UNION-FIND
-// ----------------------
-
-function Unifier() {
-	var queue = []
-
-	//////////////////////////
-	// 		UNIFICATION		//
-	//////////////////////////
-	var current_clone_phase = 0;
-	function beginClone() {
-		current_clone_phase++
-	}
-	function endClone() {
-	}
-
-	var unode_id = 0
-	function UNode() {
-		this.parent = this
-		this.rank = 0
-		this.properties = new Map
-		this.id = ++unode_id
-		this.primitives = new TypeSet
-		this.functions = new FunctionSet
-		this.call_sigs = new CallSigSet
-		this.isObject = false
-		this.clone_phase = -1
-		this.clone_target = null
-	}
-	UNode.prototype.rep = function() {
-		var p = this.parent
-		if (p === this)
-			return p
-		return this.parent = p.rep()
-	};
-	UNode.prototype.getPrty = function(name) {
-		var r = this.rep()
-		var n = r.properties.get(name)
-		if (!n) {
-			n = new UNode
-			r.properties.put(name, n)
-		}
-		return n
-	}
-	UNode.prototype.clone = function() {
-		var r = this.rep()
-		if (r.clone_phase === current_clone_phase) {
-			return r.clone_target
-		} else {
-			r.clone_phase = current_clone_phase
-			var target = r.clone_target = new UNode
-			target.primitives = r.primitives.clone()
-			target.functions = r.functions.clone()
-			target.call_sigs = r.call_sigs.clone()
-			target.isObject = r.isObject
-			r.properties.forEach(function(name,dst) {
-				target.properties.put(name, dst.clone())
-			})
-			return target
-		}
-	}
-
-	function unifyNow(n1, n2) {
-		n1 = n1.rep()
-		n2 = n2.rep()
-		if (n1 === n2)
-			return
-		if (n2.rank > n1.rank) {
-			var z = n1; n1 = n2; n2 = z; // swap n1/n2 so n1 has the highest rank
-		}
-		if (n1.rank === n2.rank) {
-			n1.rank++
-		}
-		n2.parent = n1
-		
-		// merge properties
-		for (var k in n2.properties) {
-			if (k[0] !== '$')
-				continue
-			var p2 = n2.properties[k]
-			if (k in n1.properties) {
-				var p1 = n1.properties[k]
-				unifyLater(p1, p2)
-			} else {
-				n1.properties[k] = p2
-			}
-		}
-
-		// merge other attributes
-		n1.id = Math.min(n1.id, n2.id)
-		n1.functions.addAll(n2.functions)
-		n1.primitives.addAll(n2.primitives)
-		n1.call_sigs.addAll(n2.call_sigs)
-		n1.isObject |= n2.isObject
-		
-		// clean up
-		n2.functions = null
-		n2.primitives = null
-		n2.call_sigs = null
-	}
-
-	function unifyLater(n1, n2) {
-		if (n1 !== n2) {
-			queue.push(n1)
-			queue.push(n2)
-		}
-	}
-
-	function complete() {
-		while (queue.length > 0) {
-			var n1 = queue.pop()
-			var n2 = queue.pop()
-			unifyNow(n1, n2)
-		}
-	}
-
-	//////////////////////////////
-	// 		FUNCTION NODE		//
-	//////////////////////////////
-	function FunctionNode() {
-		this.arguments = new UNode
-		this.return = new UNode
-		this.this = new UNode
-		this.self = new UNode
-		this.calls = []
-	}
-	FunctionNode.prototype.clone = function() {
-		var fnode = Object.create(FunctionNode.prototype)
-		fnode.arguments = this.arguments.clone()
-		fnode.return = this.return.clone()
-		fnode.this = this.this.clone()
-		fnode.self = this.self.clone()
-		fnode.calls = this.calls.map(function(x) { return x.clone() })
-		return fnode
-	}
-
-	function CallNode() {
-		this.arguments = new UNode
-		this.return = new UNode
-		this.this = new UNode
-		this.self = new UNode
-	}
-	CallNode.prototype.clone = function() {
-		var call = Object.create(CallNode.prototype)
-		call.arguments = this.arguments.clone()
-		call.return = this.return.clone()
-		call.this = this.this.clone()
-		call.self = this.self.clone()
-		return call
-	}
-
-	var ENV = '@env' // we hijack this property name for use as environment pointers (TODO: avoid name clash)
-	
-	var unresolved_calls = []
-	function resolveCallLater(call) {
-		unresolved_calls.push(call)
-	}
-
-	//////////////////////////////////////
-	//			HEAP -> U-NODES 		//
-	//////////////////////////////////////
-	var object2node = Object.create(null)
-	function getConcreteObject(key) {
-		return object2node[key]
-	}
-	function buildHeap() {
-		snapshot.heap.forEach(function(obj,i) {
-			if (!obj)
-				return
-			var n = object2node[i] = new UNode
-			n.isObject = true
-			if (obj.function) {
-				n.functions.add(obj.function)
-			}
-		})
-		snapshot.heap.forEach(function(obj,i) {
-			var n = object2node[i].rep()
-			if (obj.env) {
-				unify(n.getPrty(ENV), getConcreteObject(obj.env.key))
-			}
-			obj.propertyMap.forEach(function(name,prty) {
-				n = n.rep()
-				if ('value' in prty) {
-					if (prty.value && typeof prty.value === 'object') {
-						n.properties.put(name, object2node[prty.value.key])
-					} else {
-						n.getPrty(name).primitives.add({type: 'value', value:prty.value})
-					}
-				} else {
-					if (prty.getter) {
-						var call = new Call()
-						unify(call.self, getConcreteObject(prty.getter.key))
-						unify(call.return, n.getPrty(name))
-						unify(call.this, n)
-						resolveCallLater(call)
-					}
-					if (prty.setter) {
-						var call = new Call()
-						unify(call.self, getConcreteObject(prty.setter.key))
-						unify(call.arguments.getPrty("0"), n.getPrty(name))
-						unify(call.this, n)
-						resolveCallLater(call)
-					}
-				}
-			})
-		})
-		complete()
-	}
-	function getNodeForValue(value) {
-		if (value && typeof value === 'object')
-			return getConcreteObject(value.key)
-		else {
-			var node = new UNode
-			node.primitives.add({type:'value', value:value})
-		}
-	}
-	buildHeap() // TODO: create heap lazily?
-
-	//////////////////////////////
-	// 		AST -> U-NODES		//
-	//////////////////////////////
-	var ast2node = Object.create(null)
-	function getNode(x) {
-		if (x instanceof UNode)
-			return x.rep()
-		var n = ast2node[x.$id]
-		if (n) {
-			return n.rep()
-		} else {
-			return ast2node[x.$id] = new UNode
-		}
-	}
-	function unify(x) {
-		x = getNode(x)
-		for (var i=1; i<arguments.length; i++) {
-			unifyNow(x, getNode(arguments[i]))
-		}
-		complete()
-	}
-	function assumeType(x, t) {
-		propagateInputType(getNode(x),t) // FIXME: premature reference to propagation!
-	}
-
-	var function2fnode = Object.create(null)
-	function getPristineFunctionNode(fun) {
-		var fnode = function2fnode[fun.$id]
-		if (!fnode) {
-			fnode = function2[fun.$id] = makeFunction(fun)
-		}
-		return fnode
-	}
-	function makeFunction(fun) { // ast-node -> FunctionNode
-		var fnode = new FunctionNode
-		var env = new UNode
-		unify(env.getPrty(ENV), fnode.self.getPrty(ENV))
-
-		function addCall(call) {
-			fnode.calls.push(call)
-		}
-
-		function getVar(id) {
-			var scope = getEnclosingScope(id)
-			while (scope !== fun && !scope.$env.has(id.name)) {
-				scope = getEnclosingScope(scope.$parent)
-			}
-			if (scope.type === 'CatchClause')
-				return getNode(scope).getPrty(param)
-			var n = env
-			while (scope.type !== 'Program' && !scope.$env.has(id.name)) {
-				n = n.getPrty(ENV)
-				scope = getEnclosingScope(scope.$parent)
-			}
-			return n.getPrty(id.name)
-		}
-
-		function addPrototype(n, key) {
-			// TODO ???
-		}
-
-		var NULL = 'NULL' // result of expression is null or undefined
-		var NOT_NULL = 'NOT_NULL'
-		var VOID = 'VOID' // result of expression is discarded or immediately coerced to a boolean
-		var NOT_VOID = 'NOT_VOID'
-
-		function visitStmt(node) {
-			switch (node.type) {
-				case 'EmptyStatement':
-					break;
-				case 'BlockStatement':
-					node.body.forEach(visitStmt)
-					break;
-				case 'ExpressionStatement':
-					visitExpVoid(node.expression)
-					break;
-				case 'IfStatement':
-					visitExpVoid(node.test)
-					visitStmt(node.consequent)
-					if (node.alternate) {
-						visitStmt(node.alternate)
-					}
-					break;
-				case 'LabeledStatement':
-					visitStmt(node.body)
-					break;
-				case 'BreakStatement':
-					break;
-				case 'ContinueStatement':
-					break;
-				case 'WithStatement':
-					visitExp(node.object, NOT_VOID)
-					visitStmt(node.body) // TODO: flag use of `with` and don't report errors from this function
-					break;
-				case 'SwitchStatement':
-					visitExp(node.discriminant, NOT_VOID)
-					node.cases.forEach(function(c) {
-						if (c.test) {
-							visitExpVoid(c.test, NOT_VOID)
-						}
-						c.consequent.forEach(visitStmt)
-					})
-					break;
-				case 'ReturnStatement':
-					if (node.argument) {
-						visitExp(node.argument, NOT_VOID)
-						unify(fnode.return, node.argument)
-					}
-					break;
-				case 'ThrowStatement':
-					visitExpVoid(node.argument)
-					break;
-				case 'TryStatement':
-					visitStmt(node.block)
-					if (node.handler) {
-						assumeAnyType(node.handler.param)
-						visitStmt(node.handler.body)
-					}
-					if (node.finalizer) {
-						visitStmt(node.finalizer)
-					}
-					break;
-				case 'WhileStatement':
-					visitExpVoid(node.test)
-					visitStmt(node.body)
-					break;
-				case 'DoWhileStatement':
-					visitStmt(node.body)
-					visitExpVoid(node.test)
-					break;
-				case 'ForStatement':
-					if (node.init) {
-						if (node.init.type === 'VariableDeclaration') {
-							visitStmt(node.init)
-						} else {
-							visitExpVoid(node.init)
-						}
-					}
-					if (node.test) {
-						visitExpVoid(node.test)
-					}
-					if (node.update) {
-						visitExpVoid(node.update)
-					}
-					visitStmt(node.body)
-					break;
-				case 'ForInStatement':
-					var lv;
-					if (node.left.type === 'VariableDeclaration') {
-						visitStmt(node.left)
-						lv = node.left.declarations[0].id
-					} else {
-						visitExpVoid(node.left)
-						lv = node.left
-					}
-					assumeType(lv, {type: 'string'})
-					visitStmt(node.body)
-					break;
-				case 'DebuggerStatement':
-					break;
-				case 'FunctionDeclaration':
-					unify(getNode(node.id).getPrty(ENV), env) // make the active environment the new function's outer environment
-					getNode(node.id).functions.add({type: 'user', id: node.$function_id})
-					break;
-				case 'VariableDeclaration':
-					node.declarations.forEach(function(d) {
-						unify(getVar(d.id), d.id)
-						if (d.init) {
-							var p = visitExp(d.init, NOT_VOID)
-							if (p === NOT_NULL) {
-								unify(d.id, d.init)
-							}
-						}
-					})
-					break;
-				default:
-					throw new Error("Unknown statement: " + node.type)
-			}
-		}
-		function visitExpVoid(node) {
-			return visitExp(node, VOID)
-		}
-		function visitExp(node, void_ctx) {
-			switch (node.type) {
-				case 'ArrayExpression':
-					assumeType(node, {type: 'object', properties:{}, calls:[], stringIndexer:null, numberIndexer:null})
-					var n = getNode(node)
-					node.elements.forEach(function(elm, i) {
-						if (!elm)
-							return
-						visitExp(elm, NOT_VOID)
-						unify(elm, n.getPrty(String(i))) // TODO array entries
-					})
-					addPrototype(node, lookupPath("Array.prototype").key)
-					return NOT_NULL
-				case 'ObjectExpression':
-					assumeType(node, {type: 'object', properties:{}, calls:[], stringIndexer:null, numberIndexer:null})
-					node.properties.forEach(function(p) {
-						visitExp(p.value, NOT_VOID)
-						var name = p.key.type === 'Literal' ? String(p.key.value) : p.key.name
-						switch (p.kind) {
-							case 'init':
-								unify(getNode(node).getPrty(name), p.value)
-								break;
-							case 'get':
-								unify(node, getThis(p.value))
-								unify(getNode(node).getPrty(name), getReturn(p.value))
-								break;
-							case 'set':
-								unify(node, getThis(p.value))
-								if (p.value.params.length >= 1) {
-									unify(getNode(node).getPrty(name), p.value.params[0])
-								}
-								break;
-						}
-					})
-					addPrototype(node, lookupPath("Object.prototype").key)
-					return NOT_NULL
-				case 'FunctionExpression':
-					unify(node.getPrty(ENV), env)
-					getNode(node).functions.add({type: 'user', id: node.$function_id})
-					return NOT_NULL
-				case 'SequenceExpression':
-					for (var i=0; i<node.expressions.length-1; ++i) {
-						visitExpVoid(node.expressions[i])
-					}
-					unify(node, node.expressions.last())
-					return visitExp(node.expressions.last(), void_ctx)
-				case 'UnaryExpression':
-					switch (node.operator) {
-						case '+':
-						case '~':
-						case '-':
-							visitExp(node.argument, NOT_VOID)
-							assumeType(node, {type: 'number'})
-							break;
-						case '!':
-							visitExp(node.argument, VOID)
-							assumeType(node, {type: 'boolean'})
-							break;
-						case 'void':
-							visitExp(node.argument, VOID)
-							assumeType(node, {type: 'value', value: undefined})
-							return NULL
-						case 'typeof':
-							visitExp(node.argument, VOID)
-							assumeType(node, {type: 'string'})
-							break;
-						case 'delete':
-							visitExp(node.argument, VOID)
-							assumeType(node, {type: 'boolean'})
-							break;
-						default:
-							throw new Error("Unknown unary operator: " + node.operator)
-					}
-					return NOT_NULL
-				case 'BinaryExpression':
-					visitExpVoid(node.left, NOT_VOID)
-					visitExpVoid(node.right, NOT_VOID)
-					switch (node.operator) {
-						case "==":
-						case "!=":
-						case "===":
-						case "!==":
-					    case "<":
-					    case "<=":
-					    case ">":
-					    case ">=":
-					    case "in":
-					    case "instanceof":
-					    	assumeType(node, {type: 'boolean'})
-					    	break;
-
-					    case "<<":
-					    case ">>":
-					    case ">>>":
-					    case "-":
-					    case "*":
-					    case "/":
-					    case "%":
-					    case "|":
-					    case "^":
-					    case "&":
-					    	assumeType(node, {type: 'number'})
-					    	break;
-
-					    case "+": // could be either number or string (TODO: handle this more precisely, maybe by unification?)
-					    	assumeType(node, {type: 'string'})
-					    	assumeType(node, {type: 'number'})
-					    	break;
-
-					    default:
-					    	throw new Error("Unknown binary operator: " + node.operator)
-					}
-					return NOT_NULL
-				case 'AssignmentExpression':
-					if (node.operator === '=') {
-						visitExp(node.left, NOT_VOID)
-						var r = visitExp(node.right, NOT_VOID)
-						if (r !== NULL) {
-							unify(node, node.left, node.right)
-						}
-						return r
-					} else {
-						visitExp(node.left, NOT_VOID)
-						visitExp(node.right, NOT_VOID)
-						unify(node, node.left)
-						switch (node.operator) {
-							case "+=":
-								unify(node, node.left, node.right)
-								break;
-							case "-=":
-							case "*=":
-							case "/=":
-							case "%=":
-							case "<<=":
-							case ">>=" :
-							case ">>>=":
-							case "&=":
-							case "|=":
-							case "^=":
-								assumeType(node, {type: 'number'})
-								break;
-							default:
-								throw new Error("Unknown compound assignment operator: " + node.operator)
-						}
-						return NOT_NULL
-					}
-				case 'UpdateExpression':
-					visitExp(node.argument, NOT_VOID)
-					assumeType(node, {type: 'number'})
-					return NOT_NULL
-				case 'LogicalExpression':
-					if (node.operator === '&&') {
-						unify(node, node.right)
-						visitExp(node.left, VOID)
-						visitExp(node.right, void_ctx)
-						return NOT_NULL
-					} else {
-						if (!void_ctx) {
-							unify(node, node.left, node.right)
-						}
-						visitExp(node.left, void_ctx)
-						visitExp(node.right, void_ctx)
-						return NOT_NULL
-					}
-				case 'ConditionalExpression':
-					visitExp(node.test, VOID)
-					visitExp(node.consequent, void_ctx)
-					visitExp(node.alternate, void_ctx)
-					if (!void_ctx) {
-						unify(node, node.consequent, node.alternate)
-					}
-					return NOT_NULL
-				case 'NewExpression':
-					visitExp(node.callee)
-					unify(node, getNode(node.callee).getPrty("@@this"), getNode(node.callee).getPrty("prototype"))
-					for (var i=0; i<node.arguments.length; i++) {
-						visitExp(node.arguments[i])
-						unify(getNode(node.callee).getPrty("@@" + i), node.arguments[i])
-					}
-					getNode(node.callee).called = true
-					return NOT_NULL
-				case 'CallExpression':
-					visitExp(node.callee)
-					if (node.callee.type === 'MemberExpression') {
-						unify(node.callee.object, getNode(node.callee).getPrty("@@this"))
-					} else {
-						assumeType(getNode(node.callee).getPrty("@@this"), {type: 'value', value: {key: snapshot.global}})
-					}
-					for (var i=0; i<node.arguments.length; i++) {
-						visitExp(node.arguments[i])
-						unify(getNode(node.callee).getPrty("@@" + i), node.arguments[i])
-					}
-					unify(node, getNode(node.callee).getPrty("@@return"))
-					getNode(node.callee).called = true
-					return NOT_NULL
-				case 'MemberExpression':
-					visitExp(node.object, NOT_VOID)
-					if (node.computed) {
-						visitExp(node.property, NOT_VOID)
-						assumeType(node, {type: 'any'})
-						// TODO: dynamic property access
-					} else {
-						unify(node, getNode(node.object).getPrty(node.property.name))
-					}
-					return NOT_NULL
-				case 'Identifier':
-					if (node.name === 'undefined') {
-						assumeType(node, {type: 'value', value: undefined})
-						return NULL
-					}
-					unify(node, getVar(node))
-					return NOT_NULL
-				case 'Literal':
-					if (node.value instanceof RegExp) {
-						assumeType(node, {type: 'reference', name: 'RegExp', typeArguments: []})
-					} else {
-						assumeType(node, {type: 'value', value: node.value})
-					}
-					return node.value === null ? NULL : NOT_NULL
-				case 'ThisExpression':
-					unify(node, fnode.this)
-					return NOT_NULL
-				default:
-					throw new Error("Unknown expression: " + node.type)
-			}
-		}
-		return fnode
-	}
-
-
-	//////////////////////////////////
-	// 		TYPES -> U-NODES		//
-	//////////////////////////////////
-
-	function makeType(t) {
-		var type2node = Object.create(null)
-		function visit(t) {
-			switch (t.type) {
-				case 'reference':
-					var h = canonicalizeType(t)
-					if (h in type2node)
-						return type2node[h]
-					type2node[h] = new UNode
-					var n2 = visit(resolveTypeRef(t))
-					unify(n2, type2node[h])
-					return n2
-				case 'object':
-					var node = new UNode
-					for (var k in t.properties) {
-						node.properties.put(k, visit(t.properties[k].type))
-					}
-					t.calls.forEach(function(callsig) {
-						node.call_sigs.push(callsig)
-					})
-					// TODO: string indexers and number indexers
-					return node
-				case 'enum':
-					var node = new UNode
-					var enum_vals = enum_values.get(t.name)
-					if (enum_vals.length === 0) {
-						node.primitives.add({type:'any'})
-					} else {
-						enum_vals.forEach(function(v) {
-							unify(node, getNodeForValue(v))
-						})
-					}
-					return node
-				case 'node':
-					return t.node // NOTE: intended to be used to handle type parameters
-				default:
-					var node = new UNode
-					node.primitives.add(t)
-					return node
-			}
-		}
-		return visit(t)
-	}
-
-	//////////////////////////
-	//		  SOLVER		//
-	//////////////////////////
-
-	var function2shared = Object.create(null)
-	function getSharedFunctionNode(fun) {
-		var fnode = function2shared[fun.$id]
-		if (fnode)
-			return fnode
-		fnode = getPristineFunctionNode(fun)
-		beginClone()
-		fnode = fnode.clone()
-		endClone()
-		fnode.calls.forEach(resolveCallLater)
-		return function2shared[fun.$id] = fnode
-	}
-
-	function solve() {
-		complete()
-		while (unresolved_calls.length > 0) {
-			var call = unresolved_calls.pop()
-			// FIXME: re-resolve calls as more callees are discovered
-			var callee = call.self.rep()
-			callee.functions.forEach(function(fun) {
-				switch (fun.type) {
-					case 'user':
-						var fnode = getSharedFunctionNode(getFunction(fun.id))
-						unifyLater(fnode.self, call.self)
-						unifyLater(fnode.this, call.this)
-						unifyLater(fnode.arguments, call.arguments)
-						unifyLater(fnode.return, call.return)
-						break;
-					case 'native':
-						break; // TODO: handle control-flow natives like forEach, call/apply, etc, and default to types for the rest
-					case 'bind':
-						break; // TODO bound functions
-					case 'unknown':
-						break; // do nothing
-				}
-			})
-			complete()
-		}
-	}
-
-	var node_type_compatible = Object.create(null)
-	function isNodeCompatibleWithType(node, type) {
-		node = node.rep()
-		var h = node.id + "~" + canonicalizeType(type)
-		if (h in node_type_compatible)
-			return node_type_compatible[h]
-		node_type_compatible[h] = true
-		return node_type_compatible[h] = isNodeCompatibleWithTypeX(node, type)
-	}
-	function isNodeCompatibleWithTypeX(node, type) {
-		node = node.rep()
-		if (node.primitives.isAny())
-			return true
-		if (type.type === 'reference')
-			type = resolveTypeRef(type)
-		switch (type.type) {
-			case 'object':
-				for (var k in type.properties) {
-					var dst = node.properties.get(k)
-					if (dst) {
-						if (!isNodeCompatibleWithType(dst, type.properties[k].type)) {
-							return false
-						}
-					} else {
-						if (!type.properties[k].optional)
-							return false
-					}
-				}
-				// TODO: call signatures, indexers, brands(?)
-				return true
-			case 'node':
-				return node === type.node.rep()
-			case 'enum':
-				var enum_vals = enum_values.get(type.name)
-				if (enum_vals.length === 0) {
-					return true
-				}
-				return enum_vals.some(function(v) {
-					return isNodeCompatibleWithValue(node, v)
-				})
-			case 'any':
-			case 'void':
-				return true
-			case 'number':
-			case 'string':
-			case 'boolean':
-				if (node.primitives.has({type: type.type}))
-					return true
-				return node.primitives.some(function(t) {
-					return t.type === 'value' && typeof t.value === type.type
-				})
-			default:
-				throw new Error("Unexpected type: " + util.inspect(type))
-		}
-		return true
-	}
-	function isNodeCompatibleWithValue(node, v) {
-		node = node.rep()
-		if (v === null)
-			return true
-		if (v && typeof v === 'object')
-			return node === getConcreteObject(v.key)
-		if (node.primitives.has({type:'value', value:v}))
-			return true
-		switch (typeof v) {
-			case 'number':
-				return node.primitives.has({type:'number'})
-			case 'string':
-				return node.primitives.has({type:'string'})
-			case 'boolean':
-				return node.primitives.has({type:'boolean'})
-			case 'undefined':
-				return node.primitives.has({type:'void'})
-			default:
-				throw new Error("Unexpected value: " + util.inspect(v))
-		}
-	}
-	
-	//////////////////////////////////////
-	//			CHECK SIGNATURE 		//
-	//////////////////////////////////////
-	this.checkSignature = function(sig, function_key, receiver_key) {
-		// create a call node
-		var call = new Call()
-		call.self = getConcreteObject(function_key)
-		call.this = getConcreteObject(receiver_key)
-		sig.parameters.forEach(function(parm,i) {
-			propagateInputType(call.arguments.getPrty(String(i)), parm.type)
-		})
-		// propagateOutputType(call.return, sig.returnType)
-		
-		// resolve the call
-		resolveCallLater(call)
-		solve()
-
-		// TODO: check compatibility
-		for (var k in nodes_with_output) {
-			isNodeCompatibleWithType(nodes_with_output[k], sig.returnType)
-		}
-	}
-}
-
-var unifier = new Unifier
-
-// ----------------------------------
-// 		Type-Type Compatibility
-// ----------------------------------
-
-function isIndirectType(t) {
-	switch (t.type) {
-		case 'reference':
-		case 'node':
-			return true
-		case 'value':
-			return t.value && typeof t.value === 'object'
-		default:
-			return false
-	}
-}
-
-var type2type_compatible = Object.create(null)
-var object2type_compatible = Object.create(null)
-function isTypeCompatible(input, output, this_type) {
-	if (input.type === 'any' || output.type === 'any')
-		return true
-	if (input.type === 'value' && input.value === null)
-		return true
-	if (isIndirectType(input) || isIndirectType(output)) {
-		var h = canonicalizeType(input) + "~" + canonicalizeType(output) + "~" + canonicalizeType(this_type)
-		if (h in type2type_compatible)
-			return type2type_compatible[h]
-		type2type_compatible[h] = true
-		return type2type_compatible[h] = isTypeCompatibleX(input, output, this_type)
-	} else {
-		return isTypeCompatibleX(input, output, this_type)
-	}
-}
-
-function isTypeCompatibleX(input, output, this_type) {
-	if (input.type === 'reference')
-		input = resolveTypeRef(input)
-	if (output.type === 'reference')
-		output = resolveTypeRef(output)
-	switch (output.type) {
-		case 'object':
-			input = coerceTypeToObject(input)
-			switch(input.type) {
-				case 'object':
-					for (var k in output.properties) {
-						var oprty = output.properties[k]
-						if (k in input.properties) {
-							if (!isTypeCompatible(input.properties[k].type, oprty.type, input)) {
-								return false
-							}
-						} else {
-							if (!oprty.optional)
-								return false // TODO: look up using indexer
-						}
-					}
-					var callsOK = output.calls.all(function(oc) {
-						return input.calls.some(function(ic) {
-							return isCallSubtypeOf(ic, oc)
-						})
-					})
-					if (!callsOK)
-						return false
-					return true
-				case 'value':
-					var v = coerceToObject(input.value)
-					if (v && typeof v === 'object') {
-						var h = v.key + "~" + canonicalizeType(output)
-						if (output.calls.length > 0) {
-							h += "~" + canonicalizeType(this_type)
-						}
-						if (h in object2type_compatible)
-							return object2type_compatible[h]
-						object2type_compatible[h] = true
-						var obj = lookupObject(v.key)
-						for (var k in output.properties) {
-							var oprty = output.properties[k]
-							var inprty = obj.propertyMap.get(k)
-							if (inprty) {
-								if ('value' in inprty) {
-									if (!isTypeCompatible({type:'value', value:inprty.value}, oprty.type, {type: 'value', value: v})) {
-										return object2type_compatible[h] = false
-									}
-								}
-							} else {
-								if (!oprty.optional) {
-									return object2type_compatible[h] = false
-								}
-							}
-						}
-						var callsOK = output.calls.all(function(oc) {
-							return isCallSatisfiedByObject(oc, this_type, v.key)
-						})
-						if (!callsOK)
-							return object2type_compatible[h] = false
-						return true
-					} else {
-						return false
-					}
-				default:
-					return false
-			}
-		case 'string':
-			input = substituteParameterType(input)
-			return input.type === 'string' || (input.type === 'value' && typeof input.value === 'string')
-		case 'string-const':
-			input = substituteParameterType(input)
-			return input.type === 'string' || (input.type === 'value' && input.value === output.value) // TODO: subtype or compatibility??
-		case 'number':
-			return input.type === 'number' || (input.type === 'value' && typeof input.value === 'number')
-		case 'boolean':
-			return input.type === 'boolean' || (input.type === 'value' && typeof input.value === 'boolean')
-		case 'enum':
-			var vals = enum_values.get(output.name)
-			if (vals.length === 0)
-				return true
-			return vals.some(function(v) {
-				return isTypeCompatible(input, {type: 'value', value: v}, this_type)
-			})
-		case 'void':
-			return true
-		case 'any':
-			return true
-		case 'type-param':
-			return true // TODO: type-param
-		default:
-			throw new Error("isTypeCompatible " + input.type + " vs " + output.type)
-	}
-}
-
-
-var node2type_compatible = Object.create(null)
-function isNodeCompatible(node, output, this_type) {
-	if (arguments.length !== 3)
-		throw new Error("isNodeCompatible takes 3 arguments") // TODO: merge with isTypeCompatible and introduce proper 'node' type
-	node = node.rep()
-	if (node.type.any)
-		return true // fast return if node is any
-	if (output.type === 'reference') {
-		var h = node.id + "~" + canonicalizeType(output) + "~" + canonicalizeType(this_type)
-		if (node2type_compatible[h])
-			return node2type_compatible[h]
-		node2type_compatible[h] = true // assume true for nested occurrences of this judgement
-		return node2type_compatible[h] = isNodeCompatible(node, resolveTypeRef(output), this_type)
-	}
-	// TODO prototypes
-	switch (output.type) {
-		case 'object':
-			for (var k in output.properties) {
-				var inode = node.properties.get(k)
-				if (inode) {
-					if (!isNodeCompatible(inode, output.properties[k].type, {type: 'node', node: node})) {
-						return false
-					}
-				} else {
-					var isOK = node.type.some(function (t) {
-						return lookupOnType(t, k).some(function(t) {
-							return isTypeCompatible(t, output.properties[k].type, {type: 'node', node: node})
-						})
-					})
-					if (!isOK)
-						return false
-				}
-			}
-			var callsOK = output.calls.all(function(oc) {
-				// TODO: use tracked function value
-				return node.type.some(function(t) {
-					return isCallSatisfiedByType(oc, this_type, t)
-				})
-			})
-			if (!callsOK)
-				return false
-			// TODO: check indexers and brands
-			return true
-		case 'string':
-		case 'number':
-			return node.type.some(function(t) {
-				return isTypeCompatible(t, output, {type: 'any'})
-			})
-		case 'boolean':
-			return true // boolean type is sometimes used as a "boolean-like value" so we can't do a useful check here
-		case 'enum':
-			return node.type.some(function(t) {
-				return isTypeCompatible(t, output, {type: 'any'})
-			})
-		case 'void':
-			return true // it's ok to return something if void was expected
-		case 'any':
-			return true // everything satisfies any
-		case 'type-param':
-			return true // TODO type-param
-		default:
-			throw new Error("isNodeCompatible " + output.type)
-	}
-}
-
-function isCallSubtypeOf(incall, outcall) {
-	// TODO: type parameters
-	// TODO: variadic
-
-	// Check that the parameters to outcall can be used in a valid call to incall
-	for (var i=0; i<incall.parameters.length; ++i) {
-		var iparm = incall.parameters[i]
-		if (i < outcall.parameters.length) {
-			var oparm = outcall.parameters[i]
-			if (!isTypeCompatible(oparm.type, iparm.type, {type: 'any'})) {
-				return false
-			}
-		} else if (!iparm.optional) {
-			return false
-		}
-	}
-
-	// Check that return type from incall is a valid return type from outcall
-	return isTypeCompatible(incall.returnType, outcall.returnType, {type: 'any'})
-}
 
 // --------------------------
 // 		Static Analysis
@@ -2282,6 +1247,1014 @@ if (sourceFileAst) {
 	prepareAST(sourceFileAst)
 }
 
+function Analyzer() {
+	var queue = []
+
+	//////////////////////////
+	// 		UNIFICATION		//
+	//////////////////////////
+	var current_clone_phase = 0;
+	function beginClone() {
+		current_clone_phase++
+	}
+	function endClone() {
+	}
+
+	var unode_id = 0
+	function UNode() {
+		this.parent = this
+		this.rank = 0
+		this.properties = new Map
+		this.id = ++unode_id
+		this.primitives = new TypeSet
+		this.functions = new FunctionSet
+		this.call_sigs = new CallSigSet
+		this.isAny = false
+		this.isObject = false
+		this.clone_phase = -1
+		this.clone_target = null
+	}
+	UNode.prototype.rep = function() {
+		var p = this.parent
+		if (p === this)
+			return p
+		return this.parent = p.rep()
+	};
+	UNode.prototype.getPrty = function(name) {
+		var r = this.rep()
+		var n = r.properties.get(name)
+		if (!n) {
+			n = new UNode
+			r.properties.put(name, n)
+			n.isAny = this.isAny
+		}
+		return n
+	}
+	UNode.prototype.clone = function() {
+		var r = this.rep()
+		if (r.clone_phase === current_clone_phase) {
+			return r.clone_target
+		} else {
+			r.clone_phase = current_clone_phase
+			var target = r.clone_target = new UNode
+			target.primitives = r.primitives.clone()
+			target.functions = r.functions.clone()
+			target.call_sigs = r.call_sigs.clone()
+			target.isObject = r.isObject
+			target.isAny = r.isAny
+			r.properties.forEach(function(name,dst) {
+				target.properties.put(name, dst.clone())
+			})
+			return target
+		}
+	}
+	UNode.prototype.makeAny = function() {
+		var r = this.rep()
+		if (r.isAny)
+			return
+		r.isAny = true
+		r.properties.forEach(function(name,dst) {
+			dst.makeAny()
+		})
+	}
+
+	function unifyNow(n1, n2) {
+		n1 = n1.rep()
+		n2 = n2.rep()
+		if (n1 === n2)
+			return
+
+		if (n2.isAny && !n1.isAny) {
+			n1.makeAny()
+		}
+		else if (n1.isAny && !n2.isAny) {
+			n2.makeAny()
+		}
+
+		if (n2.rank > n1.rank) {
+			var z = n1; n1 = n2; n2 = z; // swap n1/n2 so n1 has the highest rank
+		}
+		if (n1.rank === n2.rank) {
+			n1.rank++
+		}
+		n2.parent = n1
+		
+		// merge properties
+		for (var k in n2.properties) {
+			if (k[0] !== '$')
+				continue
+			var p2 = n2.properties[k]
+			if (k in n1.properties) {
+				var p1 = n1.properties[k]
+				unifyLater(p1, p2)
+			} else {
+				n1.properties[k] = p2
+			}
+		}
+
+		// merge other attributes
+		n1.id = Math.min(n1.id, n2.id)
+		n1.functions.addAll(n2.functions)
+		n1.primitives.addAll(n2.primitives)
+		n1.call_sigs.addAll(n2.call_sigs)
+		n1.isObject |= n2.isObject
+		n1.isAny |= n2.isAny
+		
+		// clean up
+		n2.functions = null
+		n2.primitives = null
+		n2.call_sigs = null
+	}
+
+	function unifyLater(n1, n2) {
+		if (n1 !== n2) {
+			queue.push(n1)
+			queue.push(n2)
+		}
+	}
+
+	function complete() {
+		while (queue.length > 0) {
+			var n1 = queue.pop()
+			var n2 = queue.pop()
+			unifyNow(n1, n2)
+		}
+	}
+
+	//////////////////////////////
+	// 		FUNCTION NODE		//
+	//////////////////////////////
+	function FunctionNode() {
+		this.arguments = new UNode
+		this.return = new UNode
+		this.this = new UNode
+		this.self = new UNode
+		this.calls = []
+	}
+	FunctionNode.prototype.clone = function() {
+		var fnode = Object.create(FunctionNode.prototype)
+		fnode.arguments = this.arguments.clone()
+		fnode.return = this.return.clone()
+		fnode.this = this.this.clone()
+		fnode.self = this.self.clone()
+		fnode.calls = this.calls.map(function(x) { return x.clone() })
+		return fnode
+	}
+
+	function CallNode() {
+		this.arguments = new UNode
+		this.return = new UNode
+		this.this = new UNode
+		this.self = new UNode
+	}
+	CallNode.prototype.clone = function() {
+		var call = Object.create(CallNode.prototype)
+		call.arguments = this.arguments.clone()
+		call.return = this.return.clone()
+		call.this = this.this.clone()
+		call.self = this.self.clone()
+		return call
+	}
+
+	var ENV = '@env' // we hijack this property name for use as environment pointers (TODO: avoid name clash)
+	
+	var unresolved_calls = []
+	function resolveCallLater(call) {
+		unresolved_calls.push(call)
+	}
+
+	//////////////////////////////////////
+	//			HEAP -> U-NODES 		//
+	//////////////////////////////////////
+	var object2node = Object.create(null)
+	function getConcreteObject(key) {
+		return object2node[key].rep()
+	}
+	function buildHeap() {
+		snapshot.heap.forEach(function(obj,i) {
+			if (!obj)
+				return
+			var n = object2node[i] = new UNode
+			n.isObject = true
+			if (obj.function) {
+				n.functions.add(obj.function)
+			}
+		})
+		snapshot.heap.forEach(function(obj,i) {
+			if (!obj)
+				return
+			var n = object2node[i].rep()
+			if (obj.env) {
+				unifyNow(n.getPrty(ENV), getConcreteObject(obj.env.key))
+			}
+			obj.propertyMap.forEach(function(name,prty) {
+				n = n.rep()
+				if ('value' in prty) {
+					if (prty.value && typeof prty.value === 'object') {
+						n.properties.put(name, object2node[prty.value.key])
+					} else {
+						n.getPrty(name).primitives.add({type: 'value', value:prty.value})
+					}
+				} else {
+					if (prty.getter) {
+						var call = new CallNode()
+						unifyNow(call.self, getConcreteObject(prty.getter.key))
+						unifyNow(call.return, n.getPrty(name))
+						unifyNow(call.this, n)
+						resolveCallLater(call)
+					}
+					if (prty.setter) {
+						var call = new CallNode()
+						unifyNow(call.self, getConcreteObject(prty.setter.key))
+						unifyNow(call.arguments.getPrty("0"), n.getPrty(name))
+						unifyNow(call.this, n)
+						resolveCallLater(call)
+					}
+				}
+			})
+		})
+		complete()
+	}
+	function getNodeForValue(value) {
+		if (value && typeof value === 'object')
+			return getConcreteObject(value.key)
+		else {
+			var node = new UNode
+			node.primitives.add({type:'value', value:value})
+		}
+	}
+	buildHeap() // TODO: create heap lazily?
+
+	//////////////////////////////
+	// 		AST -> U-NODES		//
+	//////////////////////////////
+	var function2fnode = Object.create(null)
+	function getPristineFunctionNode(fun) {
+		var fnode = function2fnode[fun.$id]
+		if (!fnode) {
+			fnode = function2fnode[fun.$id] = makeFunction(fun)
+		}
+		return fnode
+	}
+	function makeFunction(fun) { // ast-node -> FunctionNode
+		var ast2node = Object.create(null)
+		function getNode(x) {
+			if (x instanceof UNode)
+				return x.rep()
+			var n = ast2node[x.$id]
+			if (n) {
+				return n.rep()
+			} else {
+				return ast2node[x.$id] = new UNode
+			}
+		}
+		function unify(x) {
+			x = getNode(x)
+			for (var i=1; i<arguments.length; i++) {
+				unifyNow(x, getNode(arguments[i]))
+			}
+		}
+		function assumeType(x, t) {
+			getNode(x).primitives.add(t)
+		}
+		function assumeAny(x) {
+			getNode(x).makeAny()
+		}
+
+		var fnode = new FunctionNode
+		var env = new UNode
+		unify(env.getPrty(ENV), fnode.self.getPrty(ENV))
+
+		if (fun.type === 'FunctionExpression' && fun.id) {
+			unify(env.getPrty(fun.id.name), fnode.self)
+		}
+		unify(env.getPrty("arguments"), fnode.arguments)
+		for (var i=0; i<fun.params.length; i++) {
+			unify(fnode.arguments.getPrty(String(i)), env.getPrty(fun.params[i].name))
+		}
+
+		function addCall(call) {
+			fnode.calls.push(call)
+		}
+
+		function getVar(id) {
+			var scope = getEnclosingScope(id)
+			while (scope !== fun && !scope.$env.has(id.name)) {
+				scope = getEnclosingScope(scope.$parent)
+			}
+			if (scope.type === 'CatchClause')
+				return getNode(scope).getPrty(param)
+			var n = env
+			while (scope.type !== 'Program' && !scope.$env.has(id.name)) {
+				n = n.getPrty(ENV)
+				scope = getEnclosingScope(scope.$parent)
+			}
+			return n.getPrty(id.name)
+		}
+
+		function addPrototype(n, key) {
+			// TODO ???
+		}
+
+		var NULL = 'NULL' // result of expression is null or undefined
+		var NOT_NULL = 'NOT_NULL'
+		var VOID = 'VOID' // result of expression is discarded or immediately coerced to a boolean
+		var NOT_VOID = 'NOT_VOID'
+
+		function visitStmt(node) {
+			switch (node.type) {
+				case 'EmptyStatement':
+					break;
+				case 'BlockStatement':
+					node.body.forEach(visitStmt)
+					break;
+				case 'ExpressionStatement':
+					visitExpVoid(node.expression)
+					break;
+				case 'IfStatement':
+					visitExpVoid(node.test)
+					visitStmt(node.consequent)
+					if (node.alternate) {
+						visitStmt(node.alternate)
+					}
+					break;
+				case 'LabeledStatement':
+					visitStmt(node.body)
+					break;
+				case 'BreakStatement':
+					break;
+				case 'ContinueStatement':
+					break;
+				case 'WithStatement':
+					visitExp(node.object, NOT_VOID)
+					visitStmt(node.body) // TODO: flag use of `with` and don't report errors from this function
+					break;
+				case 'SwitchStatement':
+					visitExp(node.discriminant, NOT_VOID)
+					node.cases.forEach(function(c) {
+						if (c.test) {
+							visitExpVoid(c.test, NOT_VOID)
+						}
+						c.consequent.forEach(visitStmt)
+					})
+					break;
+				case 'ReturnStatement':
+					if (node.argument) {
+						visitExp(node.argument, NOT_VOID)
+						unify(fnode.return, node.argument)
+					} else {
+						assumeType(fnode.return, {type:'value', value:undefined})
+					}
+					break;
+				case 'ThrowStatement':
+					visitExpVoid(node.argument)
+					break;
+				case 'TryStatement':
+					visitStmt(node.block)
+					if (node.handler) {
+						assumeAny(node.handler.param)
+						visitStmt(node.handler.body)
+						var catchEnv = getNode(node.handler)
+						var scope = getEnclosingScope(node)
+						if (scope.type === 'CatchClause') {
+							unify(catchEnv.getPrty(ENV), getNode(scope))
+						} else {
+							unify(catchEnv.getPrty(ENV), env)
+						}
+					}
+					if (node.finalizer) {
+						visitStmt(node.finalizer)
+					}
+					break;
+				case 'WhileStatement':
+					visitExpVoid(node.test)
+					visitStmt(node.body)
+					break;
+				case 'DoWhileStatement':
+					visitStmt(node.body)
+					visitExpVoid(node.test)
+					break;
+				case 'ForStatement':
+					if (node.init) {
+						if (node.init.type === 'VariableDeclaration') {
+							visitStmt(node.init)
+						} else {
+							visitExpVoid(node.init)
+						}
+					}
+					if (node.test) {
+						visitExpVoid(node.test)
+					}
+					if (node.update) {
+						visitExpVoid(node.update)
+					}
+					visitStmt(node.body)
+					break;
+				case 'ForInStatement':
+					var lv;
+					if (node.left.type === 'VariableDeclaration') {
+						visitStmt(node.left)
+						lv = node.left.declarations[0].id
+					} else {
+						visitExpVoid(node.left)
+						lv = node.left
+					}
+					assumeType(lv, {type: 'string'})
+					visitStmt(node.body)
+					break;
+				case 'DebuggerStatement':
+					break;
+				case 'FunctionDeclaration':
+					unify(node, node.id, env.getPrty(node.id.name)) // make accessible via variable name
+					getNode(node).isObject = true // mark as object
+					unify(getNode(node).getPrty(ENV), env) // make the active environment the new function's outer environment
+					getNode(node).functions.add({type: 'user', id: node.$function_id})
+					break;
+				case 'VariableDeclaration':
+					node.declarations.forEach(function(d) {
+						unify(getVar(d.id), d.id)
+						if (d.init) {
+							var p = visitExp(d.init, NOT_VOID)
+							if (p === NOT_NULL) {
+								unify(d.id, d.init)
+							}
+						}
+					})
+					break;
+				default:
+					throw new Error("Unknown statement: " + node.type)
+			}
+		}
+		function visitExpVoid(node) {
+			return visitExp(node, VOID)
+		}
+		function visitExp(node, void_ctx) {
+			switch (node.type) {
+				case 'ArrayExpression':
+					var n = getNode(node)
+					n.isObject = true
+					node.elements.forEach(function(elm, i) {
+						if (!elm)
+							return
+						visitExp(elm, NOT_VOID)
+						n = n.rep()
+						unify(elm, n.getPrty(String(i)))
+					})
+					addPrototype(node, lookupPath("Array.prototype").key)
+					return NOT_NULL
+				case 'ObjectExpression':
+					getNode(node).isObject = true
+					node.properties.forEach(function(p) {
+						visitExp(p.value, NOT_VOID)
+						var name = p.key.type === 'Literal' ? String(p.key.value) : p.key.name
+						switch (p.kind) {
+							case 'init':
+								unify(getNode(node).getPrty(name), p.value)
+								break;
+							case 'get':
+								unify(node, getThis(p.value))
+								unify(getNode(node).getPrty(name), getReturn(p.value))
+								break;
+							case 'set':
+								unify(node, getThis(p.value))
+								if (p.value.params.length >= 1) {
+									unify(getNode(node).getPrty(name), p.value.params[0])
+								}
+								break;
+						}
+					})
+					addPrototype(node, lookupPath("Object.prototype").key)
+					return NOT_NULL
+				case 'FunctionExpression':
+					var scope = getEnclosingScope(node)
+					if (scope.type === 'CatchClause') {
+						unify(getNode(node).getPrty(ENV), scope)
+					} else {
+						unify(getNode(node).getPrty(ENV), env)
+					}
+					getNode(node).isObject = true
+					getNode(node).functions.add({type: 'user', id: node.$function_id})
+					return NOT_NULL
+				case 'SequenceExpression':
+					for (var i=0; i<node.expressions.length-1; ++i) {
+						visitExpVoid(node.expressions[i])
+					}
+					unify(node, node.expressions.last())
+					return visitExp(node.expressions.last(), void_ctx)
+				case 'UnaryExpression':
+					switch (node.operator) {
+						case '+':
+						case '~':
+						case '-':
+							visitExp(node.argument, NOT_VOID)
+							assumeType(node, {type: 'number'})
+							break;
+						case '!':
+							visitExp(node.argument, VOID)
+							assumeType(node, {type: 'boolean'})
+							break;
+						case 'void':
+							visitExp(node.argument, VOID)
+							assumeType(node, {type: 'value', value: undefined})
+							return NULL
+						case 'typeof':
+							visitExp(node.argument, VOID)
+							assumeType(node, {type: 'string'})
+							break;
+						case 'delete':
+							visitExp(node.argument, VOID)
+							assumeType(node, {type: 'boolean'})
+							break;
+						default:
+							throw new Error("Unknown unary operator: " + node.operator)
+					}
+					return NOT_NULL
+				case 'BinaryExpression':
+					visitExpVoid(node.left, NOT_VOID)
+					visitExpVoid(node.right, NOT_VOID)
+					switch (node.operator) {
+						case "==":
+						case "!=":
+						case "===":
+						case "!==":
+					    case "<":
+					    case "<=":
+					    case ">":
+					    case ">=":
+					    case "in":
+					    case "instanceof":
+					    	assumeType(node, {type: 'boolean'})
+					    	break;
+
+					    case "<<":
+					    case ">>":
+					    case ">>>":
+					    case "-":
+					    case "*":
+					    case "/":
+					    case "%":
+					    case "|":
+					    case "^":
+					    case "&":
+					    	assumeType(node, {type: 'number'})
+					    	break;
+
+					    case "+": // could be either number or string (TODO: handle this more precisely, maybe by unification?)
+					    	assumeType(node, {type: 'string'})
+					    	assumeType(node, {type: 'number'})
+					    	break;
+
+					    default:
+					    	throw new Error("Unknown binary operator: " + node.operator)
+					}
+					return NOT_NULL
+				case 'AssignmentExpression':
+					if (node.operator === '=') {
+						visitExp(node.left, NOT_VOID)
+						var r = visitExp(node.right, NOT_VOID)
+						if (r !== NULL) {
+							unify(node, node.left, node.right)
+						}
+						return r
+					} else {
+						visitExp(node.left, NOT_VOID)
+						visitExp(node.right, NOT_VOID)
+						unify(node, node.left)
+						switch (node.operator) {
+							case "+=":
+								unify(node, node.left, node.right)
+								break;
+							case "-=":
+							case "*=":
+							case "/=":
+							case "%=":
+							case "<<=":
+							case ">>=" :
+							case ">>>=":
+							case "&=":
+							case "|=":
+							case "^=":
+								assumeType(node, {type: 'number'})
+								break;
+							default:
+								throw new Error("Unknown compound assignment operator: " + node.operator)
+						}
+						return NOT_NULL
+					}
+				case 'UpdateExpression':
+					visitExp(node.argument, NOT_VOID)
+					assumeType(node, {type: 'number'})
+					return NOT_NULL
+				case 'LogicalExpression':
+					if (node.operator === '&&') {
+						unify(node, node.right)
+						visitExp(node.left, VOID)
+						visitExp(node.right, void_ctx)
+						return NOT_NULL
+					} else {
+						if (!void_ctx) {
+							unify(node, node.left, node.right)
+						}
+						visitExp(node.left, void_ctx)
+						visitExp(node.right, void_ctx)
+						return NOT_NULL
+					}
+				case 'ConditionalExpression':
+					visitExp(node.test, VOID)
+					visitExp(node.consequent, void_ctx)
+					visitExp(node.alternate, void_ctx)
+					if (!void_ctx) {
+						unify(node, node.consequent, node.alternate)
+					}
+					return NOT_NULL
+				case 'NewExpression':
+					// TODO: prototype
+					var call = new CallNode
+					visitExp(node.callee)
+					unify(call.self, node.callee)
+					for (var i=0; i<node.arguments.length; i++) {
+						visitExp(node.arguments[i])
+						unify(call.arguments.getPrty(String(i)), node.arguments[i])
+					}
+					unify(call.this, node)
+					addCall(call)
+					return NOT_NULL
+				case 'CallExpression':
+					var call = new CallNode
+					visitExp(node.callee)
+					unify(call.self, node.callee)
+					if (node.callee.type === 'MemberExpression') {
+						unify(call.this, node.callee.object)
+					} else {
+						assumeAny(call.this) // TODO: experiment with any vs unify with global object
+					}
+					for (var i=0; i<node.arguments.length; i++) {
+						visitExp(node.arguments[i])
+						unify(call.arguments.getPrty(String(i)), node.arguments[i])
+					}
+					unify(call.return, node)
+					addCall(call)
+					return NOT_NULL
+				case 'MemberExpression':
+					visitExp(node.object, NOT_VOID)
+					if (node.computed) {
+						visitExp(node.property, NOT_VOID)
+						assumeAny(node)
+						// TODO: dynamic property access
+					} else {
+						unify(node, getNode(node.object).getPrty(node.property.name))
+					}
+					return NOT_NULL
+				case 'Identifier':
+					if (node.name === 'undefined') {
+						assumeType(node, {type: 'value', value: undefined})
+						return NULL
+					}
+					unify(node, getVar(node))
+					return NOT_NULL
+				case 'Literal':
+					if (node.value instanceof RegExp) {
+						getNode(node).isObject = true
+						addPrototype(node, lookupPath("RegExp.prototype").key)
+					} else {
+						assumeType(node, {type: 'value', value: node.value})
+					}
+					return node.value === null ? NULL : NOT_NULL
+				case 'ThisExpression':
+					unify(node, fnode.this)
+					return NOT_NULL
+				default:
+					throw new Error("Unknown expression: " + node.type)
+			}
+		}
+
+		visitStmt(fun.body)
+
+		return fnode
+	}
+
+
+	//////////////////////////////////
+	// 		TYPES -> U-NODES		//
+	//////////////////////////////////
+
+	function makeType(t) {
+		var type2node = Object.create(null)
+		function visit(t) {
+			switch (t.type) {
+				case 'reference':
+					var h = canonicalizeType(t)
+					if (h in type2node)
+						return type2node[h]
+					type2node[h] = new UNode
+					var n2 = visit(resolveTypeRef(t))
+					unifyNow(n2, type2node[h])
+					return n2
+				case 'object':
+					var node = new UNode
+					node.isObject = true
+					for (var k in t.properties) {
+						node.properties.put(k, visit(t.properties[k].type))
+					}
+					t.calls.forEach(function(callsig) {
+						node.call_sigs.add(callsig)
+					})
+					// TODO: string indexers and number indexers
+					return node
+				case 'enum':
+					var node = new UNode
+					var enum_vals = enum_values.get(t.name)
+					if (enum_vals.length === 0) {
+						node.makeAny()
+					} else {
+						enum_vals.forEach(function(v) {
+							unifyNow(node, getNodeForValue(v))
+						})
+					}
+					return node
+				case 'node':
+					return t.node // NOTE: intended to be used to handle type parameters
+				case 'any':
+					var node = new UNode
+					node.makeAny()
+					return node
+				default:
+					var node = new UNode
+					node.primitives.add(t)
+					return node
+			}
+		}
+		return visit(t)
+	}
+
+	//////////////////////////
+	//		  SOLVER		//
+	//////////////////////////
+
+	var function2shared = Object.create(null)
+	function getSharedFunctionNode(fun) {
+		var fnode = function2shared[fun.$id]
+		if (fnode)
+			return fnode
+		fnode = getPristineFunctionNode(fun)
+		beginClone()
+		fnode = fnode.clone()
+		endClone()
+		fnode.calls.forEach(resolveCallLater)
+		return function2shared[fun.$id] = fnode
+	}
+
+	function solve() {
+		complete()
+		while (unresolved_calls.length > 0) {
+			var call = unresolved_calls.pop()
+			// FIXME: re-resolve calls as more callees are discovered
+			var callee = call.self.rep()
+			callee.functions.forEach(function(fun) {
+				switch (fun.type) {
+					case 'user':
+						var fnode = getSharedFunctionNode(getFunction(fun.id))
+						unifyLater(fnode.self, call.self)
+						unifyLater(fnode.this, call.this)
+						unifyLater(fnode.arguments, call.arguments)
+						unifyLater(fnode.return, call.return)
+						break;
+					case 'native':
+						break; // TODO: handle control-flow natives like forEach, call/apply, etc, and default to types for the rest
+					case 'bind':
+						break; // TODO bound functions
+					case 'unknown':
+						break; // do nothing
+				}
+			})
+			complete()
+		}
+	}
+
+	//////////////////////////////////////
+	//		  COMPATIBILITY TEST 		//
+	//////////////////////////////////////
+	var visited_compatible_nodes = Object.create(null)
+	var node_type_compatible = Object.create(null)
+	function isNodeCompatibleWithType(node, type) {
+		node = node.rep()
+		visited_compatible_nodes[node.id] = node // for graphviz dot output [FIXME: remove after debugging]
+		var h = node.id + "~" + canonicalizeType(type)
+		if (h in node_type_compatible)
+			return node_type_compatible[h]
+		node_type_compatible[h] = true
+		return node_type_compatible[h] = isNodeCompatibleWithTypeX(node, type)
+	}
+	function isNodeCompatibleWithTypeX(node, type) {
+		node = node.rep()
+		if (node.isAny)
+			return true
+		if (type.type === 'reference')
+			type = resolveTypeRef(type)
+		switch (type.type) {
+			case 'object':
+				for (var k in type.properties) {
+					var dst = node.properties.get(k)
+					if (dst) {
+						if (!isNodeCompatibleWithType(dst, type.properties[k].type)) {
+							return false
+						}
+					} else {
+						if (!type.properties[k].optional)
+							return false
+					}
+				}
+				// TODO: call signatures, indexers, brands(?)
+				return true
+			case 'node':
+				return node === type.node.rep()
+			case 'enum':
+				var enum_vals = enum_values.get(type.name)
+				if (enum_vals.length === 0) {
+					return true
+				}
+				return enum_vals.some(function(v) {
+					return isNodeCompatibleWithValue(node, v)
+				})
+			case 'any':
+			case 'void':
+				return true
+			case 'number':
+			case 'string':
+			case 'boolean':
+				if (node.primitives.has({type: type.type}))
+					return true
+				return node.primitives.some(function(t) {
+					return t.type === 'value' && typeof t.value === type.type
+				})
+			default:
+				throw new Error("Unexpected type: " + util.inspect(type))
+		}
+		return true
+	}
+	function isNodeCompatibleWithValue(node, v) {
+		node = node.rep()
+		if (v === null)
+			return true
+		if (v && typeof v === 'object')
+			return node === getConcreteObject(v.key)
+		if (node.primitives.has({type:'value', value:v}))
+			return true
+		switch (typeof v) {
+			case 'number':
+				return node.primitives.has({type:'number'})
+			case 'string':
+				return node.primitives.has({type:'string'})
+			case 'boolean':
+				return node.primitives.has({type:'boolean'})
+			case 'undefined':
+				return node.primitives.has({type:'void'})
+			default:
+				throw new Error("Unexpected value: " + util.inspect(v))
+		}
+	}
+	
+	//////////////////////////////////////
+	//			CHECK SIGNATURE 		//
+	//////////////////////////////////////
+	this.checkSignature = function(sig, function_key, receiver_key) {
+		// instantiate the call signature
+		var tenv = new Map
+		sig.typeParameters.forEach(function(tp) {
+			var node
+			if (tp.constraint) {
+				var c = substType(tp.constraint, tenv)
+				node = makeType(c)
+			} else {
+				node = new UNode
+			}
+			tenv.put(tp.name, {type: 'node', node:node})
+		})
+		sig = substCall(sig, tenv)
+
+		// create a call node
+		var call = new CallNode()
+		call.self = getConcreteObject(function_key)
+		if (sig.new) {
+			call.this = getConcreteObject(function_key).getPrty("prototype") // TODO: better handling of prototypes
+		} else {
+			call.this = getConcreteObject(receiver_key)
+		}
+		sig.parameters.forEach(function(parm,i) {
+			unifyNow(call.arguments.getPrty(String(i)), makeType(parm.type))
+		})
+		
+		// resolve the call
+		resolveCallLater(call)
+		solve()
+
+		var returnNode = sig.new ? call.this : call.return
+		var ok = isNodeCompatibleWithType(returnNode, sig.returnType)
+
+		// DEBUGGING: dump to .dot file
+		function dumpGraphviz() {
+			var graphviz = new Graphviz
+			// graphviz.visitNode(makeType(lookupQType("Obj", [])))
+			graphviz.visitNode(call.arguments)
+			graphviz.visitNode(call.return)
+
+			var obj = lookupObject(function_key)
+			var id = obj.function.id
+			var fun = getFunction(id)
+			var name = getFunctionPrettyName(fun)
+			var filename = name + '.dot'
+			fs.writeFileSync(name + '.dot', graphviz.finish())
+		}
+		// dumpGraphviz()
+
+		return ok
+	}
+	
+	//////////////////////////////////////
+	//			GRAPHVIZ DOT     		//
+	//////////////////////////////////////
+	function Graphviz() {
+		var sb = []
+		function print(x) {
+			sb.push(x)
+		}
+		print("digraph {")
+
+		var seen_nodes = Object.create(null)
+		function makeNodeLabel(node) {
+			var str = []
+			if (node.isObject) {
+				str.push("object")
+			}
+			if (node.isAny) {
+				str.push("any")
+			}
+			node.primitives.forEach(function(t) {
+				str.push(formatType(t))
+			})
+			return str.join(',')
+		}
+		function visitNode(node) {
+			node = node.rep()
+			// if (!visited_compatible_nodes[node.id])
+			// 	return
+			if (seen_nodes[node.id])
+				return
+			seen_nodes[node.id] = true
+			print(node.id + ' [shape=box,label="' + escapeLabel(makeNodeLabel(node)) + '"]')
+			node.properties.forEach(function(name,dst) {
+				print(node.id + ' -> ' + dst.rep().id + ' [label="' + escapeLabel(name) + '"]')
+				visitNode(dst)
+			})
+		}
+
+		function visitFNode(fnode) {
+			visitNode(fnode.self)
+			visitNode(fnode.this)
+			visitNode(fnode.arguments)
+			visitNode(fnode.return)
+			// todo: calls?
+		}
+		function visitCall(call) {
+			visitNode(call.self)
+			visitNode(call.this)
+			visitNode(call.arguments)
+			visitNode(call.return)
+		}
+
+		this.visitNode = visitNode
+		this.visitFNode = visitFNode
+		this.visitCall = visitCall
+		this.finish = function() {
+			print("}\n")
+			return sb.join('\n')
+		}
+	}
+}
+
+
+function isCallSubtypeOf(incall, outcall) {
+	// TODO: type parameters
+	// TODO: variadic
+
+	// Check that the parameters to outcall can be used in a valid call to incall
+	for (var i=0; i<incall.parameters.length; ++i) {
+		var iparm = incall.parameters[i]
+		if (i < outcall.parameters.length) {
+			var oparm = outcall.parameters[i]
+			if (!isTypeCompatible(oparm.type, iparm.type, {type: 'any'})) {
+				return false
+			}
+		} else if (!iparm.optional) {
+			return false
+		}
+	}
+
+	// Check that return type from incall is a valid return type from outcall
+	return isTypeCompatible(incall.returnType, outcall.returnType, {type: 'any'})
+}
+
+
 
 function substituteParameterType(t) {
 	if (t.type === 'string-const') {
@@ -2289,372 +2262,6 @@ function substituteParameterType(t) {
 	} else {
 		return t
 	}
-}
-
-function Analyzer() {
-	var unifier = new Unifier
-
-	
-}
-
-
-function isCallSatisfiedByType(call, this_type, t) {
-	if (arguments.length !== 3)
-		throw new Error("isCallSatisfiedByType takes 3 arguments")
-	if (t.type === 'reference')
-		t = resolveTypeRef(t)
-	switch (t.type) {
-		case 'value':
-			if (t.value && typeof t.value === 'object') {
-				return isCallSatisfiedByObject(call, this_type, t.value.key)
-			} else {
-				return false
-			}
-		case 'object':
-			return t.calls.some(function(c) {
-				return isCallSubtypeOf(c, call)
-			})
-		case 'any':
-			return true
-		default:
-			return false
-	}
-} 
-
-var call_object_assumptions = Object.create(null)
-function isCallSatisfiedByObject(call, this_type, fun_key) {
-	if (arguments.length !== 3)
-		throw new Error("isCallSatisfiedByObject takes 3 arguments")
-	var fun_obj = lookupObject(fun_key)
-	if (!fun_obj.function)
-		return false // not a function object
-	if (fun_obj.function.type !== 'user')
-		return true // can't check (TODO: check 'bind' functions)
-
-	var h = fun_key + "~" + canonicalizeCall(call) //+ (call.new ? '' : ("~" + canonicalizeType(this_type)))
-	if (h in call_object_assumptions)
-		return call_object_assumptions[h]
-	call_object_assumptions[h] = true
-
-	// console.log(h)
-
-	var fun = getFunction(fun_obj.function.id)
-	if (!fun) {
-		console.warn("Function " + fun_obj.function.id + " appears to be missing")
-		return true
-	}
-	var unodes = []
-	function makeNode() {
-		var n = new UNode
-		unodes.push(n)
-		return n
-	}
-	var current_env_object = fun_obj.env.key
-	var current_env_boundary = fun
-	var astnode2unode = Object.create(null)
-	function getNode(x) {
-		if (x instanceof UNode)
-			return x.rep()
-		var h = x.$id + '-' + current_env_object
-		var n = astnode2unode[h]
-		if (n)
-			return n.rep()
-		return astnode2unode[h] = makeNode()
-	}
-	function unify(x) {
-		x = getNode(x)
-		for (var i=1; i<arguments.length; ++i) {
-			unifier.unify(x, getNode(arguments[i]))
-		}
-	}
-	var astnode2env_node = Object.create(null)
-	function getEnv(fun) {
-		var n = astnode2env_node[fun.$id]
-		if (n)
-			return n.rep()
-		return astnode2env_node[fun.$id] = makeNode()
-	}
-	function getVarFromEnv(name) {
-		var e = current_env_object
-		while (e) {
-			var obj = lookupObject(e)
-			var prty = obj.propertyMap.get(name)
-			if (prty) {
-				if (prty.value && typeof prty.value === 'object')
-					return getConcreteObject(prty.value.key)
-				else
-					return getConcreteObject(e).getPrty(name)
-			}
-			e = obj.env && obj.env.key
-		}
-		return getConcreteObject(snapshot.global).getPrty(name)
-	}
-	function getVar(node) {
-		var name = node.name
-		var scope = getEnclosingScope(node)
-		while (scope.type !== 'Program' && !scope.$env.has(name)) {
-			if (scope === current_env_boundary) {
-				return getVarFromEnv(name)
-			}
-			scope = getEnclosingScope(scope.$parent)
-		}
-		return getEnv(scope).getPrty(name)
-	}
-	function getThis(fun) {
-		return getEnv(fun).getPrty("@this")
-	}
-	function getSelf(fun) {
-		return getEnv(fun).getPrty("@self")	
-	}
-	function getReturn(fun) {
-		return getEnv(fun).getPrty("@return")	
-	}
-	function assumeAnyType(e) {
-		getNode(e).type.add({type: 'any'})
-	}
-	function assumeType(e, t) {
-		if (t.type === 'node') {
-			unify(e, t.node)
-		} else if (t.type === 'value' && t.value && typeof t.value === 'object') {
-			if (!t.value.key) {
-				console.dir(t.value)
-			}
-			unify(e, getConcreteObject(t.value.key))
-		} else {
-			getNode(e).type.add(t)
-		}
-	}
-	function addPrototype(node, key) {
-		// TODO: can we get away with this??
-		getNode(node).type.add({type: 'value', value: {key: key}})
-	}
-
-	// getConcreteObject(x) maps an object key to a union-find node
-	var concrete_objects = Object.create(null)
-	function getConcreteObject(x) {
-		if (typeof x !== 'number')
-			throw new Error("getConcreteObject was given non-number: " + x)
-		var n = concrete_objects[x]
-		if (!n) {
-			concrete_objects[x] = n = makeNode()
-			n.type.add({type: 'value', value: {key: x}})
-		} else {
-			n = n.rep()
-		}
-		return n
-	}
-
-	// We create union-find nodes for every variable in the environment
-	// Their type is bound to the value held in the environment object,
-	// and variables pointing to the same object are unified
-	// function visitEnvObjects() {
-	// 	var scope = getEnclosingScope(fun.$parent)
-	// 	var e = fun_obj.env
-	// 	while (e) {
-	// 		var obj = lookupObject(e.key)
-	// 		scope.$env.forEach(function(name) {
-	// 			var node = getEnv(scope).getPrty(name)
-	// 			var prty = obj.propertyMap.get(name)
-	// 			if (prty && 'value' in prty) {
-	// 				assumeType(node, {type: 'value', value:prty.value})
-	// 			}
-	// 		})
-	// 		e = obj.env
-	// 		scope = getEnclosingScope(scope.$parent)
-	// 	}
-	// }
-	// visitEnvObjects()
-
-	var visited_functions = Object.create(null)
-	function visitFunction(fun, self_key, receiver_node, env_key) {
-		var h = fun.$id + "~" + env_key
-		if (visited_functions[h])
-			return false
-		visited_functions[h] = true
-		var old = {obj: current_env_object, bound: current_env_boundary}
-		current_env_object = env_key
-		current_env_boundary = fun
-
-		for (var i=0; i<fun.params.length; i++) {
-			unify(fun.params[i], getVar(fun.params[i]), getSelf(fun).getPrty("@@" + i))
-		}
-		unify(getThis(fun), getSelf(fun).getPrty("@@this"), receiver_node)
-		unify(getSelf(fun), getConcreteObject(self_key))
-		unify(getReturn(fun), getSelf(fun).getPrty("@@return"))
-		if (fun.type === 'FunctionExpression' && fun.id) {
-			unify(fun.id, getVar(fun.id), getSelf(fun))
-		}
-		// assumeType(getThis(fun), {type: 'value', value: {key: receiver_node}})
-		// assumeType(getSelf(fun), {type: 'value', value: {key: self_key}})
-
-		visitStmt(fun.body)
-
-		current_env_object = old.obj
-		current_env_boundary = old.bound
-
-		return true
-	}
-
-	// We use the types from the call signature on the parameters
-	// FIXME: type parameters (either replace type-params by their bounds, or handle them directly)
-	// FIXME: variadic functions
-	// function visitParameters() {
-	// 	for (var i=0; i<fun.params.length; i++) {
-	// 		unify(fun.params[i], getVar(fun.params[i]))
-	// 		if (i < call.parameters.length) {
-	// 			assumeType(fun.params[i], substituteParameterType(call.parameters[i].type))
-	// 		} else {
-	// 			assumeType(fun.params[i], {type: 'value', value: undefined})
-	// 		}
-	// 	}
-	// }
-	// visitParameters()
-
-	// // Assign a value to this and the function name
-	// function visitFunctionStuff() {
-	// 	assumeType(getSelf(fun), {type: 'value', value: {key: fun_key}})
-	// 	if (fun.type === 'FunctionExpression' && fun.id) {
-	// 		unify(fun.id, getVar(fun.id.name), getSelf(fun))
-	// 	}
-	// 	if (call.new) {
-	// 		var protoPrty = fun_obj.propertyMap.get("prototype")
-	// 		if (protoPrty && protoPrty.value && typeof protoPrty.value === 'object') {
-	// 			addPrototype(getThis(fun), protoPrty.value.key)
-	// 		}
-	// 	} else {
-	// 		assumeType(getThis(fun), this_type)
-	// 	}
-	// }
-	// visitFunctionStuff()
-
-	var NULL = true
-	var NOT_NULL = false
-	var VOID = true // result is not used or is coerced to a boolean before being used
-	var NOT_VOID = false
-	
-	
-	var receiver_node = makeNode()
-	assumeType(receiver_node, this_type)
-	visitFunction(fun, fun_key, receiver_node, fun_obj.env.key)
-	unifier.complete()
-
-	function applyParamTypes() {
-		for (var i=0; i<fun.params.length; i++) {
-			if (i < call.parameters.length) {
-				assumeType(fun.params[i], call.parameters[i].type)
-			} else {
-				assumeType(fun.params[i], {type: 'value', value: undefined})
-			}
-		}
-	}
-	applyParamTypes()
-
-	var changed = true
-	while (changed) {
-		changed = false
-		// add all nodes to list (those created by getPrty) and discard non-root nodes from list
-		var newlist = []
-		var inlist = Object.create(null)
-		function addNodeToList(node) {
-			node = node.rep()
-			if (inlist[node.id])
-				return
-			inlist[node.id] = true
-			newlist.push(node)
-			node.properties.forEach(function(name,dst) {
-				addNodeToList(dst)
-			})
-		}
-		unodes.forEach(addNodeToList)
-		unodes = newlist // discard non-root elements
-
-		propagateTypes(unodes)
-
-		unodes.forEach(function(node) {
-			if (node.called) {
-				node.type.forEach(function(t) {
-					if (t.type === 'value' && t.value && typeof t.value === 'object') {
-						var obj = lookupObject(t.value.key)
-						if (obj.function && obj.function.type === 'user') {
-							changed |= visitFunction(getFunction(obj.function.id), t.value.key, node.getPrty("@@this"), obj.env.key)
-						}
-					} else {
-						// TODO: call signatures
-					}
-				})
-			}
-		})
-		unifier.complete()
-	}
-
-	var returnNode = call.new ? getThis(fun) : getReturn(fun)
-
-	// function buildPredecessorMap() {
-	// 	var preds = new Map
-	// 	unodes.forEach(function(node) {
-	// 		node = node.rep()
-	// 		if (preds[node.id])
-	// 			return
-	// 		var list = preds[node.id] = []
-	// 		node.properties.forEach(function(name,dst) {
-	// 			list.push(dst)
-	// 		})
-	// 	})
-	// 	return preds
-	// }
-	// var predecessors = buildPredecessorMap()
-
-	// function demandOnType(t, name) {
-	// 	t = coerceTypeToObject(t)
-	// 	if (t.type === 'reference')
-	// 		t = resolveTypeRef(t)
-	// 	if (t.type !== 'object')
-	// 		return null
-	// 	var prty = t.properties[name]
-	// 	if (prty) {
-	// 		return prty.type
-	// 	}
-	// 	if (t.numberIndexer && isNumberString(name))
-	// 		return t.numberIndexer
-	// 	if (t.stringIndexer)
-	// 		return t.stringIndexer
-	// 	return null
-	// }
-
-	// var type_demands = Object.create(null)
-	// var effect_demands = Object.create(null)
-	// function propagateTypeDemand(node, typ) {
-	// 	node = node.rep()
-	// 	var h = node.id + '-' + canonicalizeType(typ)
-	// 	if (h in type_demands)
-	// 		return
-	// 	type_demands[h] = true
-	// 	node.needType = true
-	// 	node.properties.forEach(function(name,dst) {
-	// 		demandOnType(dst, t)
-	// 	})
-	// 	propagateEffectDemand(node)
-	// }
-	// function propagateEffectDemand(node) {
-	// 	node = node.rep()
-	// 	if (node.needEffect)
-	// 		return
-	// 	node.needEffect = true
-	// 	predecessors.get(node).forEach(function(pred) {
-	// 		propagateEffectDemand(pred)
-	// 	})
-	// }
-	// propagateTypeDemand(returnNode)
-
-	if (program.ptsDot) {
-		var dotcode = pointsToDot(unodes)
-		require('fs').writeFileSync(getFunctionPrettyName(fun) + ".dot", dotcode, 'utf8')
-	}
-
-	// check return type
-	var isOK = isNodeCompatible(returnNode, call.returnType, {type: 'any'})
-
-	return call_object_assumptions[h] = isOK
 }
 
 function getFunctionPrettyName(f) {
