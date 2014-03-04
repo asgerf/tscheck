@@ -3,3 +3,4 @@ tests/*.js
 testcases/*.json
 *.sublime-project
 *.sublime-workspace
+output

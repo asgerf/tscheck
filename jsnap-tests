@@ -1,0 +1,7 @@
+for file in testcases/*.js
+do
+	filename=`basename $file`
+	name=${filename%.js}
+	echo $name
+	jsnap $file > testcases/$name.jsnap
+done
