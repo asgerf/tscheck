@@ -131,12 +131,8 @@ function initialize() {
 			])
 
 		// Load source code
-		if (sourceFile) {
-			var sourceFileText = fs.readFileSync(sourceFile, 'utf8')
-			sourceFileAst = esprima.parse(sourceFileText, {loc:true})
-		} else {
-			sourceFileAst = null
-		}
+		var sourceFileText = fs.readFileSync(sourceFile, 'utf8')
+		sourceFileAst = esprima.parse(sourceFileText, {loc:true})
 
 		load_handlers.forEach(function(fn) {
 			fn();
