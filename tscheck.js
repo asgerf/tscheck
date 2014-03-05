@@ -13,6 +13,7 @@ program.option('--compact', 'Report at most one violation per type path')
 	   .option('--coverage', 'Print declaration file coverage')
 	   .option('--no-warn', 'Squelch type errors')
 	   .option('--no-jsnap', 'Do not regenerate .jsnap file, even if older than .js file')
+	   .option('--verbose', 'More verbose fatal error messages')
 program.parse(process.argv);
 
 if (program.args.length === 0) {
@@ -39,7 +40,7 @@ function getArgumentWithExtension(ext) {
 	}
 }
 function generateSnapshot(jsfile, jsnapfile, callback) {
-	console.log("Regenerating jsnap file `" + jsnapfile + "` from `" + jsfile + "`")
+	// console.log("Regenerating jsnap file `" + jsnapfile + "` from `" + jsfile + "`")
 	var spawn = require('child_process').spawn
 	var fd = fs.openSync(jsnapfile, 'w')
 	var proc = spawn('jsnap', [jsfile], {stdio:['ignore',fd,2]})
@@ -48,7 +49,7 @@ function generateSnapshot(jsfile, jsnapfile, callback) {
 	})
 	proc.on('close', function(code) {
 		if (code !== 0) {
-			console.err("jsnap failed with exit code " + code)
+			console.error("jsnap failed with exit code " + code)
 			process.exit(1)
 		}
 		callback(jsnapfile)
@@ -75,8 +76,11 @@ function onLoaded(fn) {
 	}
 }
 
-function fatalError(msg) {
+function fatalError(msg, e) {
 	console.error(msg)
+	if (program.verbose) {
+		console.error(e.stack)
+	}
 	process.exit(1)
 }
 
@@ -117,7 +121,11 @@ function initialize() {
 	function loadInputs(snapshotFile) {
 		// Load snapshot
 		var snapshotText = fs.readFileSync(snapshotFile, 'utf8');
-		snapshot = JSON.parse(snapshotText);
+		try {
+			snapshot = JSON.parse(snapshotText);
+		} catch (e) {
+			fatalError("Parse error in " + snapshotFile, e)
+		}
 
 		// Load TypeScript
 		var typeDeclText = fs.readFileSync(typeDeclFile, 'utf8');
@@ -125,14 +133,22 @@ function initialize() {
 		var libFile = __dirname + "/lib/lib.d.ts";
 		var libFileText = fs.readFileSync(libFile, 'utf8');
 
-		typeDecl = tscore([
+		try {
+			typeDecl = tscore([
 				{file: LIB_ORIGIN, text:libFileText},
 				{file: typeDeclFile, text:typeDeclText}
 			])
+		} catch (e) {
+			fatalError("Could not parse " + typeDeclFile + ": " + e, e)
+		}
 
 		// Load source code
 		var sourceFileText = fs.readFileSync(sourceFile, 'utf8')
-		sourceFileAst = esprima.parse(sourceFileText, {loc:true})
+		try {
+			sourceFileAst = esprima.parse(sourceFileText, {loc:true})
+		} catch (e) {
+			fatalError("Syntax error in " + sourceFileText + ": " + e, e)
+		}
 
 		load_handlers.forEach(function(fn) {
 			fn();
@@ -364,6 +380,24 @@ function substType(type, tenv) {
 	}
 }
 
+function instantiateCall(call, targs) {
+	if (targs.length !== call.typeParameters.length)
+		throw new Error("Given " + targs.length + " type arguments to call " + formatTypeCall(call))
+	if (targs.length === 0)
+		return call // optimization
+	var tenv = new Map
+	call.typeParameters.forEach(function(tp,i) {
+		tenv.put(tp.name, targs[i])
+	})
+	return {
+		new: call.new,
+		variadic: call.variadic,
+		typeParameters: [],
+		parameters: call.parameters.map(substParameter.fill(undefined, tenv)),
+		returnType: substType(call.returnType, tenv),
+		meta: call.meta
+	}
+}
 
 // ---------------------------------
 // 		 Type Canonicalization
@@ -545,11 +579,11 @@ onLoaded(determineEnums)
 // ------------------------------------------------------------
 
 onLoaded(function() {
-	var ObjectPrototype = lookupPath("Object.prototype");
-	var NumberPrototype = lookupPath("Number.prototype");
-	var StringPrototype = lookupPath("String.prototype");
-	var BooleanPrototype = lookupPath("Boolean.prototype");
-	var FunctionPrototype = lookupPath("Function.prototype");	
+	ObjectPrototype = lookupPath("Object.prototype");
+	NumberPrototype = lookupPath("Number.prototype");
+	StringPrototype = lookupPath("String.prototype");
+	BooleanPrototype = lookupPath("Boolean.prototype");
+	FunctionPrototype = lookupPath("Function.prototype");	
 })
 
 function coerceToObject(x) {
@@ -768,6 +802,8 @@ function checkCallSignature(call, receiverKey, functionKey, path) {
 		console.log(path + ": expected " + formatTypeCall(call) + " but found non-function object")
 		return
 	}
+	if (functionObj.function.type === 'native')
+		return // do not check natives
 	var analyzer = new Analyzer
 	var ok = analyzer.checkSignature(call, functionKey, receiverKey)
 	if (!ok) {
@@ -1077,6 +1113,8 @@ function formatType(type) {
 			return type.name;
 		case 'value':
 			return 'value(' + formatValue(type.value) + ')'
+		case 'node':
+			return '#' + type.node.rep().id
 	}
 	return util.inspect(type)
 }
@@ -2205,7 +2243,7 @@ function Analyzer() {
 	//////////////////////////////////////
 	this.checkSignature = function(sig, function_key, receiver_key) {
 		// instantiate the call signature
-		var tenv = new Map
+		var targs = []
 		sig.typeParameters.forEach(function(tp) {
 			var node
 			if (tp.constraint) {
@@ -2214,9 +2252,9 @@ function Analyzer() {
 			} else {
 				node = new UNode
 			}
-			tenv.put(tp.name, {type: 'node', node:node})
+			targs.push({type: 'node', node:node})
 		})
-		sig = substCall(sig, tenv)
+		sig = instantiateCall(sig, targs)
 
 		// create a call node
 		var call = new CallNode()

@@ -1,4 +1,4 @@
 interface A {
 	x: string;
 }
-declare var foo : A;
+declare var bad : A;

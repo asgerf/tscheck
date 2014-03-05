@@ -1,2 +1,4 @@
-var obj = {foo: 5};
-Object.seal(obj);
+var good = {foo: 5};
+Object.seal(good);
+
+var bad = {};

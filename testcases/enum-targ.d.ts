@@ -4,5 +4,6 @@ interface Foo<T> {
 declare enum E {
 	X, Y
 }
-declare var foo : Foo<E>;
+declare var good : Foo<E>;
+declare var bad : Foo<E>;
 

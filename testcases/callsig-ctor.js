@@ -1,14 +1,12 @@
-function Foo(x) {
+function good(x) {
 	this.x = x;
 	this.y = "df";
 }
-Foo.prototype.getX = function() {
+good.prototype.getX = function() {
 	return this.x;
 }
-Foo.prototype.getY = function() {
+good.prototype.getY = function() {
 	return this.y;
 }
 
-function numb() {
-	return 23;
-}
+var bad = good;

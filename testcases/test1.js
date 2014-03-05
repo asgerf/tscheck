@@ -1,1 +1,1 @@
-var foo = { x: 5 };
+var bad = { x: 5 };

@@ -1,4 +1,4 @@
-declare class Foo {
+declare class good {
 	x: number;
 	y: string;
 	constructor(x:number);
@@ -7,4 +7,11 @@ declare class Foo {
 	getY(): string;
 }
 
-declare function numb(): number;
+declare class bad {
+	x: number;
+	y: string;
+	constructor(x:string);
+
+	getX(): number;
+	getY(): string;
+}

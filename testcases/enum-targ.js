@@ -2,7 +2,9 @@ var E = {
 	X: 5,
 	Y: 6
 }
-var foo = {
+var good = {
 	x: E.X
-};
-
+}
+var bad = {
+	x: 7
+}

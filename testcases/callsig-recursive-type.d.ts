@@ -5,4 +5,5 @@ interface Bar {
 	g: Foo
 }
 
-declare function getF(x:Foo): Bar;
+declare function good(x:Foo): Bar;
+declare function bad(x:Foo): Foo;

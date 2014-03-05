@@ -6,3 +6,5 @@ function B() {
 	this.y = 6;
 }
 var b = new B();
+
+var bad = {y: 6}

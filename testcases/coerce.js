@@ -1,1 +1,1 @@
-var x = 7;
+var good = 7;

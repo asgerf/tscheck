@@ -1,0 +1,19 @@
+set -e
+dir="testcases"
+pad="........................"
+for file in $dir/*.js
+do
+	name=`basename $file`
+	name=${name%.js}
+	printf "%s %s " $name ${pad:${#name}}
+	# echo -ne "$name "
+	tscheck $file --verbose > output/$name.out
+	N=`cat output/$name.out | wc -l`
+	B=`grep bad output/$name.out | wc -l`
+	if [ $N -ne $B -o $N -eq 0 ]
+	then
+		echo "FAIL"
+	else
+		echo "OK"
+	fi
+done
