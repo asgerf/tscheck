@@ -24,21 +24,25 @@ function fillExtension(path, ext) {
 		return path
 	if (path.endsWith('.'))
 		return path + ext
+	if (path.endsWith('.js')) {
+		path = path.substring(0, path.length - '.js'.length)
+	} else if (path.endsWith('.d.ts')) {
+		path = path.substring(0, path.length - '.d.ts'.length)
+	}
 	return path + '.' + ext
 }
 function getArgumentWithExtension(ext) {
 	if (program.args.length === 1) {
-		var path = fillExtension(program.args[0], ext)
-		return fs.existsSync(path) ? path : null
+		return fillExtension(program.args[0], ext)
 	} else {
 		return program.args.find(function(x) { return x.endsWith('.' + ext) })
 	}
 }
 function generateSnapshot(jsfile, jsnapfile, callback) {
-	console.log("Regenerating jsnap file " + jsnapfile + " from " + jsfile)
+	console.log("Regenerating jsnap file `" + jsnapfile + "` from `" + jsfile + "`")
 	var spawn = require('child_process').spawn
 	var fd = fs.openSync(jsnapfile, 'w')
-	var proc = spawn('echo', [jsfile], ['ignore',fd,2])
+	var proc = spawn('jsnap', [jsfile], {stdio:['ignore',fd,2]})
 	proc.on('exit', function() {
 		fs.close(fd)
 	})
@@ -51,35 +55,62 @@ function generateSnapshot(jsfile, jsnapfile, callback) {
 	})
 }
 function checkSnapshot(jsfile, jsnapfile, callback) {
-	if (jsnapfile === null) {
-		jsnapfile = fillExtension(program.args[0], 'jsnap')
-		generateSnapshot(jsfile, jsnapfile, callback)
-		return
-	}
-	var js_stat = fs.statSync(jsfile)
-	var jsnap_stat = fs.statSync(jsnapfile)
-	if (jsnap_stat.mtime >= js_stat.mtime) {
-		console.log("Reusing jsnap file " + jsnapfile)
-		callback(jsnapfile)
-		return
+	if (fs.existsSync(jsnapfile)) {
+		var js_stat = fs.statSync(jsfile)
+		var jsnap_stat = fs.statSync(jsnapfile)
+		if (jsnap_stat.mtime >= js_stat.mtime) {
+			callback(jsnapfile)
+			return
+		}
 	}
 	generateSnapshot(jsfile, jsnapfile, callback)
 }
 
 var load_handlers = []
 function onLoaded(fn) {
-	load_handlers.push(fn)
+	if (load_handlers === null) {
+		fn();
+	} else {
+		load_handlers.push(fn)
+	}
 }
 
+function fatalError(msg) {
+	console.error(msg)
+	process.exit(1)
+}
+
+var LIB_ORIGIN = ">lib.d.ts"; // pad origin with ">" to ensure it does not collide with user input
 
 var snapshot, typeDecl, sourceFileAst;
 function initialize() {
-	var sourceFile = getArgumentWithExtension('js')// program.args[2] || null;
+	var sourceFile = getArgumentWithExtension('js')
+	if (!sourceFile) {
+		fatalError("No .js file specified")
+	}
+	if (!fs.existsSync(sourceFile)) {
+		fatalError("Could not find " + sourceFile)
+	}
+
 	var typeDeclFile = getArgumentWithExtension('d.ts')
+	if (!typeDeclFile) {
+		fatalError("No .d.ts file specified")
+	}
+	if (!fs.existsSync(typeDeclFile)) {
+		fatalError("Could not find " + typeDeclFile)
+	}
+
 	var snapshotFile = getArgumentWithExtension('jsnap')
+	if (!snapshotFile) {
+		snapshotFile = sourceFile + 'nap' // replace .js -> .jsnap
+	}
+	
 	if (program.jsnap) {
 		checkSnapshot(sourceFile, snapshotFile, loadInputs)
 	} else {
+		if (!fs.existsSync(snapshotFile)) {
+			fatalError("Could not find " + snapshotFile)
+		}
 		loadInputs();
 	}
 
@@ -93,8 +124,6 @@ function initialize() {
 
 		var libFile = __dirname + "/lib/lib.d.ts";
 		var libFileText = fs.readFileSync(libFile, 'utf8');
-
-		var LIB_ORIGIN = ">lib.d.ts"; // pad origin with ">" to ensure it does not collide with user input
 
 		typeDecl = tscore([
 				{file: LIB_ORIGIN, text:libFileText},
@@ -112,6 +141,7 @@ function initialize() {
 		load_handlers.forEach(function(fn) {
 			fn();
 		})
+		load_handlers = null
 	}
 }
 initialize()
