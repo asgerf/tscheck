@@ -78,7 +78,7 @@ function onLoaded(fn) {
 
 function fatalError(msg, e) {
 	console.error(msg)
-	if (program.verbose) {
+	if (program.verbose && e) {
 		console.error(e.stack)
 	}
 	process.exit(1)
@@ -1356,7 +1356,11 @@ function numberASTNodes(ast) {
 }
 
 function getFunction(id) {
-	return sourceFileAst && sourceFileAst.$id2function[id]
+	var f = sourceFileAst.$id2function[id]
+	if (!f) {
+		console.error("Missing function with ID " + id)
+	}
+	return f
 }
 
 function prepareAST(ast) {
@@ -1561,6 +1565,9 @@ function Analyzer() {
 			var n = object2node[i] = new UNode
 			n.isObject = true
 			if (obj.function) {
+				if (obj.function.type === 'user' && !obj.function.id) {
+					console.error(util.inspect(obj))
+				}
 				n.functions.add(obj.function)
 			}
 		})
@@ -2065,6 +2072,9 @@ function Analyzer() {
 	function makeType(t) {
 		var type2node = Object.create(null)
 		function visit(t) {
+			if (t === null) { // for incomplete .d.ts files, ideally should not happen
+				var n = new UNode; n.makeAny(); return n;
+			} 
 			switch (t.type) {
 				case 'reference':
 					var h = canonicalizeType(t)
@@ -2137,6 +2147,9 @@ function Analyzer() {
 			callee.functions.forEach(function(fun) {
 				switch (fun.type) {
 					case 'user':
+						if (!fun.id) {
+							console.error(util.inspect(fun))
+						}
 						var fnode = getSharedFunctionNode(getFunction(fun.id))
 						unifyLater(fnode.self, call.self)
 						unifyLater(fnode.this, call.this)
