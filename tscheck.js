@@ -1390,17 +1390,62 @@ function Analyzer() {
 
 	var unode_id = 0
 	function UNode() {
+		// union-find information
 		this.parent = this
 		this.rank = 0
-		this.properties = new Map
+		// cloning information
+		this.clone_phase = -1
+		this.clone_target = null
+		this.global = false
+		// attributes
 		this.id = ++unode_id
+		this.properties = new Map
 		this.primitives = new TypeSet
 		this.functions = new FunctionSet
 		this.call_sigs = new CallSigSet
 		this.isAny = false
 		this.isObject = false
-		this.clone_phase = -1
-		this.clone_target = null
+		// prototype
+		this.proto = null
+		this.next_sibling = null // nodes with the same prototype are connected by this circularly linked list
+		this.prev_sibling = null
+		this.proto_child = null // any node with this as its prototype
+		// Invariants: 
+		// - proto != this (ie. cannot be prototype of self)
+		// - if proto != null, then next_sibling, prev_sibling form a circularly linked list of nodes whose rep().proto == this.proto
+		// - proto_child points to any node whose rep().proto == this, or null if no such node exists
+		// - proto.property(f) and this.property(f) are unified or the pair is in the worklist
+	}
+	// Runs a callback for each proto-child of this node. The callback may not modify the union-find or prototype data
+	// of any nodes, except freshly created ones. Attributes and cloning may be modified.
+	UNode.prototype.foreachChild = function(fn) {
+		var r = this.rep()
+		if (r.proto_child === null)
+			return
+		var child = r.proto_child = r.proto_child.rep()
+		do {
+			fn(child)
+			child = child.next_sibling.rep()
+		} while (child !== r.proto_child)
+	}
+	UNode.prototype.makeChild = function() {
+		var r = this.rep()
+		var child = new UNode
+		child.proto = r
+		if (r.proto_child === null) {
+			r.proto_child = child
+			child.next_sibling = child.prev_sibling = child
+		} else {
+			r.proto_child = r.proto_child.rep()
+			var xs = r.proto_child.next_sibling.rep()
+			child.next_sibling = xs
+			child.prev_sibling = r.proto_child
+			r.proto_child.next_sibling = child
+			xs.prev_sibling = child
+		}
+		child.properties = r.properties.clone() // easy way to propagate all properties initially
+		child.isObject = true
+		return child
 	}
 	UNode.prototype.rep = function() {
 		var p = this.parent
@@ -1414,13 +1459,20 @@ function Analyzer() {
 		if (!n) {
 			n = new UNode
 			r.properties.put(name, n)
-			n.isAny = this.isAny
+			n.isAny = r.isAny
+			n.global = r.global
+			// propagate to proto children
+			r.foreachChild(function(child) {
+				unifyLater(n, child.getPrty(name))
+			})
 		}
 		return n
 	}
 	UNode.prototype.clone = function() {
 		var r = this.rep()
-		if (r.clone_phase === current_clone_phase) {
+		if (r.global) {
+			return r
+		} else if (r.clone_phase === current_clone_phase) {
 			return r.clone_target
 		} else {
 			r.clone_phase = current_clone_phase
@@ -1433,6 +1485,20 @@ function Analyzer() {
 			r.properties.forEach(function(name,dst) {
 				target.properties.put(name, dst.clone())
 			})
+			if (r.proto) {
+				target.proto = r.proto.clone()
+				if (target.proto.proto_child === null) {
+					target.proto.proto_child = target
+					target.next_sibling = target.prev_sibling = target
+				} else {
+					var x = target.proto.proto_child.rep()
+					var y = x.next_sibling.rep()
+					x.next_sibling = target
+					target.prev_sibling = x
+					target.next_sibling = y
+					y.prev_sibling = target
+				}
+			}
 			return target
 		}
 	}
@@ -1441,8 +1507,18 @@ function Analyzer() {
 		if (r.isAny)
 			return
 		r.isAny = true
+		console.log("makeAny " + r.id)
 		r.properties.forEach(function(name,dst) {
 			dst.makeAny()
+		})
+	}
+	UNode.prototype.makeGlobal = function() {
+		var r = this.rep()
+		if (r.global)
+			return
+		r.global = true
+		r.properties.forEach(function(name,dst) {
+			dst.makeGlobal()
 		})
 	}
 
@@ -1452,11 +1528,34 @@ function Analyzer() {
 		if (n1 === n2)
 			return
 
+		// unifying objects with different prototypes should be done later
+		if (n1.proto && n2.proto && n1.proto.rep() !== n2.proto.rep()) {
+			complexUnifyLater(n1, n2)
+			return
+		}
+
+		n1.foreachChild(function(child) {
+			n2.properties.forEach(function(name,dst) {
+				unifyLater(dst, child.getPrty(name))
+			})
+		})
+		n2.foreachChild(function(child) {
+			n1.properties.forEach(function(name,dst) {
+				unifyLater(dst, child.getPrty(name))
+			})
+		})
+
 		if (n2.isAny && !n1.isAny) {
 			n1.makeAny()
 		}
 		else if (n1.isAny && !n2.isAny) {
 			n2.makeAny()
+		}
+		if (n2.global && !n1.global) {
+			n1.makeGlobal()
+		}
+		else if (n1.global && !n2.global) {
+			n2.makeGlobal()
 		}
 
 		if (n2.rank > n1.rank) {
@@ -1480,6 +1579,40 @@ function Analyzer() {
 			}
 		}
 
+		// prototype
+		if (n2.proto) { // note: only one of these can have a non-null prototype unless they are the same
+			n1.proto = n2.proto
+			n1.next_sibling = n2.next_sibling
+			n1.prev_sibling = n2.prev_sibling
+		}
+		if (n1.proto && n1.proto.rep() === n1) {
+			var x = n1.next_sibling.rep()
+			var y = n1.prev_sibling.rep()
+			if (x === n1) {
+				n1.next_sibling = n1.prev_sibling = n1.proto = n1.proto_child = null
+			} else {
+				x.next_sibling = y
+				y.prev_sibling = x
+				n1.proto_child = x
+				n1.next_sibling = null
+				n1.prev_sibling = null
+				n1.proto = null
+			}
+		}
+		if (n1.proto_child && n2.proto_child) {
+			var x1 = n1.proto_child.rep()
+			var x2 = x1.next_sibling.rep()
+			var y1 = n2.proto_child.rep()
+			var y2 = y1.next_sibling.rep()
+			x1.next_sibling = y2
+			y2.prev_sibling = x1
+			y1.next_sibling = x2
+			x2.prev_sibling = y1
+		}
+		else if (n2.proto_child) {
+			n1.proto_child = n2.proto_child
+		}
+
 		// merge other attributes
 		n1.id = Math.min(n1.id, n2.id)
 		n1.functions.addAll(n2.functions)
@@ -1487,7 +1620,8 @@ function Analyzer() {
 		n1.call_sigs.addAll(n2.call_sigs)
 		n1.isObject |= n2.isObject
 		n1.isAny |= n2.isAny
-		
+		n1.globals |= n2.global
+
 		// clean up
 		n2.functions = null
 		n2.primitives = null
@@ -1506,6 +1640,91 @@ function Analyzer() {
 			var n1 = queue.pop()
 			var n2 = queue.pop()
 			unifyNow(n1, n2)
+		}
+	}
+
+	function inheritsFrom(x, y) {
+		x = x.rep()
+		y = y.rep()
+		var fast = x
+		var slow = x
+		while (true) {
+			fast = fast.proto
+			if (!fast)
+				return false
+			fast = fast.rep()
+			if (fast === y)
+				return true
+			fast = fast.proto
+			if (!fast)
+				return false
+			fast = fast.rep()
+			if (fast === y)
+				return true
+			slow = slow.proto.rep()
+			if (slow === fast)
+				return false
+		}
+	}
+	function complexUnify(n1, n2) {
+		n1 = n1.rep()
+		n2 = n2.rep()
+		if (n1 === n2)
+			return
+		if (!n1.proto || !n2.proto || n1.proto.rep() === n2.proto.rep()) {
+			unifyNow(n1, n2)
+			return
+		}
+		n1.proto = n1.proto.rep()
+		n2.proto = n2.proto.rep()
+
+		function removePrototype(n1) {
+			var x = n1.prev_sibling.rep()
+			var y = n1.next_sibling.rep()
+			if (n1 === x) {
+				n1.proto.proto_child = null
+			} else {
+				n1.proto.proto_child = x
+				x.next_sibling = y
+				y.prev_sibling = x
+			}
+			n1.next_sibling = n1.prev_sibling = n1.proto = null
+		}
+
+		// check if one prototype inherits directly from the other
+		if (inheritsFrom(n1.proto, n2.proto)) {
+			removePrototype(n2)
+			unifyNow(n1,n2)
+		}
+		else if (inheritsFrom(n2.proto, n1.proto)) {
+			removePrototype(n1)
+			unifyNow(n1,n2)
+		}
+		else {
+			console.log("ANY proto")
+			// abandon both prototypes, unify the nodes, and mark them both as 'any'
+			removePrototype(n1)
+			removePrototype(n2)
+			n1.makeAny()
+			n2.makeAny()
+			unifyNow(n1,n2)
+		}
+	}
+
+	var complexQueue = []
+	function complexUnifyLater(n1, n2) {
+		if (n1 !== n2) {
+			complexQueue.push(n1)
+			complexQueue.push(n2)
+		}
+	}
+	function complexComplete() {
+		complete()
+		while (complexQueue.length > 0) {
+			var n1 = complexQueue.pop()
+			var n2 = complexQueue.pop()
+			complexUnify(n1, n2)
+			complete()
 		}
 	}
 
@@ -1564,6 +1783,7 @@ function Analyzer() {
 				return
 			var n = object2node[i] = new UNode
 			n.isObject = true
+			n.global = true
 			if (obj.function) {
 				if (obj.function.type === 'user' && !obj.function.id) {
 					console.error(util.inspect(obj))
@@ -1683,8 +1903,11 @@ function Analyzer() {
 			return n.getPrty(id.name)
 		}
 
-		function addPrototype(n, key) {
-			// TODO ???
+		function addNodePrototype(n, proto) {
+			unify(n, getNode(proto).makeChild())
+		}
+		function addNativePrototype(n, path) {
+			addNodePrototype(n, getConcreteObject(lookupPath(path).key))
 		}
 
 		var NULL = 'NULL' // result of expression is null or undefined
@@ -1831,7 +2054,7 @@ function Analyzer() {
 						n = n.rep()
 						unify(elm, n.getPrty(String(i)))
 					})
-					addPrototype(node, lookupPath("Array.prototype").key)
+					addNativePrototype(n, "Array.prototype")
 					return NOT_NULL
 				case 'ObjectExpression':
 					getNode(node).isObject = true
@@ -1854,7 +2077,7 @@ function Analyzer() {
 								break;
 						}
 					})
-					addPrototype(node, lookupPath("Object.prototype").key)
+					addNativePrototype(node, "Object.prototype")
 					return NOT_NULL
 				case 'FunctionExpression':
 					var scope = getEnclosingScope(node)
@@ -1999,7 +2222,6 @@ function Analyzer() {
 					}
 					return NOT_NULL
 				case 'NewExpression':
-					// TODO: prototype
 					var call = new CallNode
 					visitExp(node.callee)
 					unify(call.self, node.callee)
@@ -2009,6 +2231,7 @@ function Analyzer() {
 					}
 					unify(call.this, node)
 					addCall(call)
+					addNodePrototype(call.this, getNode(node.callee).getPrty("prototype"))
 					return NOT_NULL
 				case 'CallExpression':
 					var call = new CallNode
@@ -2046,7 +2269,7 @@ function Analyzer() {
 				case 'Literal':
 					if (node.value instanceof RegExp) {
 						getNode(node).isObject = true
-						addPrototype(node, lookupPath("RegExp.prototype").key)
+						addNativePrototype(node, "RegExp.prototype")
 					} else {
 						assumeType(node, {type: 'value', value: node.value})
 					}
@@ -2125,6 +2348,8 @@ function Analyzer() {
 	//		  SOLVER		//
 	//////////////////////////
 
+	// var graphviz = new Graphviz
+
 	var function2shared = Object.create(null)
 	function getSharedFunctionNode(fun) {
 		var fnode = function2shared[fun.$id]
@@ -2138,12 +2363,18 @@ function Analyzer() {
 		return function2shared[fun.$id] = fnode
 	}
 
+	var call_num = 0;
 	function solve() {
-		complete()
+		complexComplete()
 		while (unresolved_calls.length > 0) {
 			var call = unresolved_calls.pop()
 			// FIXME: re-resolve calls as more callees are discovered
 			var callee = call.self.rep()
+			console.log("callee = " + callee.id)
+			if (callee.isAny || call.this.rep().isAny) {
+				console.log("ANY CALL")
+				call.return.makeAny()
+			}
 			callee.functions.forEach(function(fun) {
 				switch (fun.type) {
 					case 'user':
@@ -2164,7 +2395,7 @@ function Analyzer() {
 						break; // do nothing
 				}
 			})
-			complete()
+			complexComplete()
 		}
 	}
 
@@ -2292,17 +2523,18 @@ function Analyzer() {
 		function dumpGraphviz() {
 			var graphviz = new Graphviz
 			// graphviz.visitNode(makeType(lookupQType("Obj", [])))
-			graphviz.visitNode(call.arguments)
-			graphviz.visitNode(call.return)
+			graphviz.visitCall(call)
+			// graphviz.visitNode(call.return)
 
 			var obj = lookupObject(function_key)
 			var id = obj.function.id
 			var fun = getFunction(id)
-			var name = getFunctionPrettyName(fun)
+			var name = getFunctionPrettyName(fun) + '_' + canonicalizeCall(sig)
 			var filename = name + '.dot'
 			fs.writeFileSync(name + '.dot', graphviz.finish())
+			console.log("Dumping to " + filename + " with ok = " + ok)
 		}
-		// dumpGraphviz()
+		dumpGraphviz()
 
 		return ok
 	}
@@ -2339,10 +2571,16 @@ function Analyzer() {
 				return
 			seen_nodes[node.id] = true
 			print(node.id + ' [shape=box,label="' + escapeLabel(makeNodeLabel(node)) + '"]')
-			node.properties.forEach(function(name,dst) {
-				print(node.id + ' -> ' + dst.rep().id + ' [label="' + escapeLabel(name) + '"]')
-				visitNode(dst)
-			})
+			if (!node.global) {
+				node.properties.forEach(function(name,dst) {
+					print(node.id + ' -> ' + dst.rep().id + ' [label="' + escapeLabel(name) + '"]')
+					visitNode(dst)
+				})
+				if (node.proto) {
+					print(node.id + ' -> ' + node.proto.rep().id + ' [label="[proto]"]')
+					visitNode(node.proto)
+				}
+			}
 		}
 
 		function visitFNode(fnode) {
