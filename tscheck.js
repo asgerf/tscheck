@@ -695,6 +695,19 @@ function check(type, value, path, userPath, parentKey, tpath) {
 						if ('value' in objPrty) {
 							check(typePrty.type, objPrty.value, qualify(path,k), isUserPath, value.key, qualify(tpath,k))
 						} else {
+							if (objPrty.get) {
+								var call = {
+									new: false,
+									variadic: false,
+									typeParameters: [],
+									parameters: [],
+									returnType: typePrty.type,
+									meta: {
+										isGetter: true
+									}
+								}
+								checkCallSignature(call, value.key, objPrty.get.key, qualify(path,k))
+							}
 							// todo: getters and setters require static analysis
 						}
 					}
@@ -1384,6 +1397,8 @@ function Analyzer() {
 	//////////////////////////
 	var current_clone_phase = 0;
 	function beginClone() {
+		if (queue.length > 0)
+			throw new Error("Must complete worklist before cloning!")
 		current_clone_phase++
 	}
 	function endClone() {
@@ -1552,6 +1567,7 @@ function Analyzer() {
 		this.this = new UNode
 		this.self = new UNode
 		this.calls = []
+		this.inherits = []
 	}
 	FunctionNode.prototype.clone = function() {
 		var fnode = Object.create(FunctionNode.prototype)
@@ -1560,7 +1576,7 @@ function Analyzer() {
 		fnode.this = this.this.clone()
 		fnode.self = this.self.clone()
 		fnode.calls = this.calls.map(function(x) { return x.clone() })
-		fnode.env = this.env // FIXME: remove when not debugging
+		fnode.inherits = this.inherits.map(function(x) { return x.clone() })
 		return fnode
 	}
 
@@ -1579,11 +1595,23 @@ function Analyzer() {
 		return call
 	}
 
+	function InheritNode(proto, child) {
+		this.proto = proto
+		this.child = child
+	}
+	InheritNode.prototype.clone = function() {
+		return new InheritNode(this.proto.clone(), this.child.clone())
+	}
+
 	var ENV = '@env' // we hijack this property name for use as environment pointers (TODO: avoid name clash)
 	
 	var unresolved_calls = []
 	function resolveCallLater(call) {
 		unresolved_calls.push(call)
+	}
+	var unresolved_inherits = []
+	function resolveInheritLater(inherit) {
+		unresolved_inherits.push(inherit)
 	}
 
 	//////////////////////////////////////
@@ -1623,16 +1651,16 @@ function Analyzer() {
 						n.getPrty(name).primitives.add({type: 'value', value:prty.value})
 					}
 				} else {
-					if (prty.getter) {
+					if (prty.get) {
 						var call = new CallNode()
-						unifyNow(call.self, getConcreteObject(prty.getter.key))
+						unifyNow(call.self, getConcreteObject(prty.get.key))
 						unifyNow(call.return, n.getPrty(name))
 						unifyNow(call.this, n)
 						resolveCallLater(call)
 					}
-					if (prty.setter) {
+					if (prty.set) {
 						var call = new CallNode()
-						unifyNow(call.self, getConcreteObject(prty.setter.key))
+						unifyNow(call.self, getConcreteObject(prty.set.key))
 						unifyNow(call.arguments.getPrty("0"), n.getPrty(name))
 						unifyNow(call.this, n)
 						resolveCallLater(call)
@@ -1722,6 +1750,7 @@ function Analyzer() {
 		}
 
 		function addNodePrototype(n, proto) {
+			fnode.inherits.push(new InheritNode(getNode(proto), getNode(n)))
 			// unify(n, getNode(proto).makeChild())
 		}
 		function addNativePrototype(n, path) {
@@ -2174,57 +2203,130 @@ function Analyzer() {
 		if (fnode)
 			return fnode
 		fnode = getPristineFunctionNode(fun)
-		complete() // make function body complete	
+		resolveInherits() // make function body complete	
 		beginClone()
 		fnode = fnode.clone()
 		endClone()
 		fnode.calls.forEach(resolveCallLater)
+		fnode.inherits.forEach(resolveInheritLater)
 		return function2shared[fun.$id] = fnode
 	}
 
-	// var include_calls = []
-	function solve() {
-		// var fnodes = []
+	function resolveInherits() {
+		// FIXME: handle transitive inheritance
 		complete()
-		unresolved_calls = unresolved_calls.concat(unresolved_calls)
-		while (unresolved_calls.length > 0) {
-			var call = unresolved_calls.pop()
-			// include_calls.push(call)
-			// FIXME: re-resolve calls as more callees are discovered
-			var callee = call.self.rep()
-			if (callee.isAny) {
-				call.return.makeAny()
+		var changed = true
+		function unify(x,y) {
+			x = x.rep()
+			y = y.rep()
+			if (x !== y) {
+				unifyLater(x,y)
+				changed = true
 			}
-			callee.functions.forEach(function(fun) {
-				switch (fun.type) {
-					case 'user':
-						if (!fun.id) {
-							console.error(util.inspect(fun))
-						}
-						var fnode = getSharedFunctionNode(getFunction(fun.id))
-						// fnodes.push(fnode)
-						unifyLater(fnode.self, call.self)
-						unifyLater(fnode.this, call.this)
-						unifyLater(fnode.arguments, call.arguments)
-						unifyLater(fnode.return, call.return)
-						break;
-					case 'native':
-						break; // TODO: handle control-flow natives like forEach, call/apply, etc, and default to types for the rest
-					case 'bind':
-						break; // TODO bound functions
-					case 'unknown':
-						break; // do nothing
+		}
+		while (changed) {
+			changed = false
+			unresolved_inherits.forEach(function(inh) {
+				var proto = inh.proto.rep()
+				var child = inh.child.rep()
+				if (proto === child)
+					return
+				if (proto.properties.size > child.properties.size) {
+					for (var k in child.properties) {
+						if (k[0] !== '$')
+							continue
+						if (!(k in proto.properties))
+							continue
+						unify(proto.properties[k], child.properties[k])
+					}
+				} else {
+					for (var k in proto.properties) {
+						if (k[0] !== '$')
+							continue
+						if (!(k in child.properties))
+							continue
+						unify(child.properties[k], proto.properties[k])
+					}
 				}
 			})
 			complete()
 		}
-		// fnodes.forEach(function(fnode) {
-		// 	graphviz.visitFNode(fnode)
-		// })
-		// include_calls.forEach(function(call) {
-		// 	graphviz.visitCall(call)
-		// })
-		
+		return changed
+	}
+
+	function solve() {
+		var changed = true
+		function unify(x,y) {
+			x = x.rep()
+			y = y.rep()
+			if (x !== y) {
+				unifyLater(x,y)
+				changed = true
+			}
+		}
+		while (changed) {
+			changed = false
+
+			// Resolve inheritance
+			complete()
+			unresolved_inherits.forEach(function(inh) {
+				var proto = inh.proto.rep()
+				var child = inh.child.rep()
+				if (proto === child)
+					return
+				// compare properties that are present on both nodes
+				// iterate over the smallest map to speed things up
+				if (proto.properties.size > child.properties.size) {
+					for (var k in child.properties) {
+						if (k[0] !== '$')
+							continue
+						if (!(k in proto.properties))
+							continue
+						unify(proto.properties[k], child.properties[k])
+					}
+				} else {
+					for (var k in proto.properties) {
+						if (k[0] !== '$')
+							continue
+						if (!(k in child.properties))
+							continue
+						unify(child.properties[k], proto.properties[k])
+					}
+				}
+				complete()
+			})
+
+			// Resolve calls
+			complete()
+			unresolved_calls.forEach(function(call) {
+				var callee = call.self.rep()
+				if (callee.isAny) {
+					call.return.makeAny()
+					return
+				}
+				callee.functions.forEach(function(fun) {
+					switch (fun.type) {
+						case 'user':
+							if (!fun.id) {
+								console.error(util.inspect(fun))
+							}
+							var fnode = getSharedFunctionNode(getFunction(fun.id))
+							unify(fnode.self, call.self)
+							unify(fnode.this, call.this)
+							unify(fnode.arguments, call.arguments)
+							unify(fnode.return, call.return)
+							break;
+						case 'native':
+							break; // TODO: handle control-flow natives like forEach, call/apply, etc, and default to types for the rest
+						case 'bind':
+							break; // TODO bound functions
+						case 'unknown':
+							break; // do nothing
+					}
+				})
+				complete()
+			})
+		}
 	}
 
 	//////////////////////////////////////
@@ -2335,17 +2437,17 @@ function Analyzer() {
 	function formatNodeAsPrimitive(node) {
 		if (node.isAny)
 			return 'any'
-		if (node.primitives.length === 0) {
+		var b = []
+		node.primitives.forEach(function(t) {
+			b.push(formatType(t))
+		})
+		if (b.length === 0) {
 			if (node.isObject)
 				return 'object'
 			else
 				return 'nothing'
 		}
 		else {
-			var b = []
-			node.primitives.forEach(function(t) {
-				b.push(formatType(t))
-			})
 			return b.join('|')
 		}
 	}
@@ -2385,7 +2487,13 @@ function Analyzer() {
 		solve()
 
 		var returnNode = sig.new ? call.this : call.return
-		var ok = isNodeCompatibleWithType(returnNode, sig.returnType, path + '(' + sig.parameters.map(function(x) {return formatType(x.type)}).join(',') + ')')
+		var qpath;
+		if (sig.meta && sig.meta.isGetter) {
+			qpath = path
+		} else {
+			qpath = path + '(' + sig.parameters.map(function(x) {return formatType(x.type)}).join(',') + ')'
+		}
+		var ok = isNodeCompatibleWithType(returnNode, sig.returnType, qpath)
 
 		// DEBUGGING: dump to .dot file
 		function dumpGraphviz() {
