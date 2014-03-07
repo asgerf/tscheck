@@ -2368,7 +2368,6 @@ function Analyzer() {
 	}
 
 	// var include_calls = []
-	var call_num = 0;
 	function solve() {
 		// var fnodes = []
 		complexComplete()
