@@ -1507,7 +1507,6 @@ function Analyzer() {
 		if (r.isAny)
 			return
 		r.isAny = true
-		console.log("makeAny " + r.id)
 		r.properties.forEach(function(name,dst) {
 			dst.makeAny()
 		})
@@ -1666,11 +1665,13 @@ function Analyzer() {
 				return false
 		}
 	}
+	// var include_graphviz = []
 	function complexUnify(n1, n2) {
 		n1 = n1.rep()
 		n2 = n2.rep()
 		if (n1 === n2)
 			return
+		// include_graphviz.push(n1)
 		if (!n1.proto || !n2.proto || n1.proto.rep() === n2.proto.rep()) {
 			unifyNow(n1, n2)
 			return
@@ -1701,7 +1702,6 @@ function Analyzer() {
 			unifyNow(n1,n2)
 		}
 		else {
-			console.log("ANY proto")
 			// abandon both prototypes, unify the nodes, and mark them both as 'any'
 			removePrototype(n1)
 			removePrototype(n2)
@@ -1745,6 +1745,7 @@ function Analyzer() {
 		fnode.this = this.this.clone()
 		fnode.self = this.self.clone()
 		fnode.calls = this.calls.map(function(x) { return x.clone() })
+		fnode.env = this.env // FIXME: remove when not debugging
 		return fnode
 	}
 
@@ -1875,6 +1876,8 @@ function Analyzer() {
 		var fnode = new FunctionNode
 		var env = new UNode
 		unify(env.getPrty(ENV), fnode.self.getPrty(ENV))
+
+		fnode.env = env // FIXME: remove when not debugging
 
 		if (fun.type === 'FunctionExpression' && fun.id) {
 			unify(env.getPrty(fun.id.name), fnode.self)
@@ -2348,7 +2351,7 @@ function Analyzer() {
 	//		  SOLVER		//
 	//////////////////////////
 
-	// var graphviz = new Graphviz
+	var graphviz = new Graphviz
 
 	var function2shared = Object.create(null)
 	function getSharedFunctionNode(fun) {
@@ -2356,6 +2359,7 @@ function Analyzer() {
 		if (fnode)
 			return fnode
 		fnode = getPristineFunctionNode(fun)
+		complexComplete() // make function body complete	
 		beginClone()
 		fnode = fnode.clone()
 		endClone()
@@ -2363,16 +2367,18 @@ function Analyzer() {
 		return function2shared[fun.$id] = fnode
 	}
 
+	// var include_calls = []
 	var call_num = 0;
 	function solve() {
+		// var fnodes = []
 		complexComplete()
+		unresolved_calls = unresolved_calls.concat(unresolved_calls)
 		while (unresolved_calls.length > 0) {
 			var call = unresolved_calls.pop()
+			// include_calls.push(call)
 			// FIXME: re-resolve calls as more callees are discovered
 			var callee = call.self.rep()
-			console.log("callee = " + callee.id)
-			if (callee.isAny || call.this.rep().isAny) {
-				console.log("ANY CALL")
+			if (callee.isAny) {
 				call.return.makeAny()
 			}
 			callee.functions.forEach(function(fun) {
@@ -2382,6 +2388,7 @@ function Analyzer() {
 							console.error(util.inspect(fun))
 						}
 						var fnode = getSharedFunctionNode(getFunction(fun.id))
+						// fnodes.push(fnode)
 						unifyLater(fnode.self, call.self)
 						unifyLater(fnode.this, call.this)
 						unifyLater(fnode.arguments, call.arguments)
@@ -2397,6 +2404,13 @@ function Analyzer() {
 			})
 			complexComplete()
 		}
+		// fnodes.forEach(function(fnode) {
+		// 	graphviz.visitFNode(fnode)
+		// })
+		// include_calls.forEach(function(call) {
+		// 	graphviz.visitCall(call)
+		// })
+		
 	}
 
 	//////////////////////////////////////
@@ -2521,7 +2535,11 @@ function Analyzer() {
 
 		// DEBUGGING: dump to .dot file
 		function dumpGraphviz() {
-			var graphviz = new Graphviz
+			include_graphviz.forEach(function(x) {
+				x = x.rep()
+				graphviz.visitNode(x)
+			})
+			// var graphviz = new Graphviz
 			// graphviz.visitNode(makeType(lookupQType("Obj", [])))
 			graphviz.visitCall(call)
 			// graphviz.visitNode(call.return)
@@ -2534,7 +2552,7 @@ function Analyzer() {
 			fs.writeFileSync(name + '.dot', graphviz.finish())
 			console.log("Dumping to " + filename + " with ok = " + ok)
 		}
-		dumpGraphviz()
+		// dumpGraphviz()
 
 		return ok
 	}
@@ -2573,6 +2591,8 @@ function Analyzer() {
 			print(node.id + ' [shape=box,label="' + escapeLabel(makeNodeLabel(node)) + '"]')
 			if (!node.global) {
 				node.properties.forEach(function(name,dst) {
+					if (name in {})
+						return // ignore trivial properties
 					print(node.id + ' -> ' + dst.rep().id + ' [label="' + escapeLabel(name) + '"]')
 					visitNode(dst)
 				})
@@ -2588,13 +2608,22 @@ function Analyzer() {
 			visitNode(fnode.this)
 			visitNode(fnode.arguments)
 			visitNode(fnode.return)
+			if (fnode.env)
+				visitNode(fnode.env)
 			// todo: calls?
 		}
+		var calln = 0
 		function visitCall(call) {
 			visitNode(call.self)
 			visitNode(call.this)
 			visitNode(call.arguments)
 			visitNode(call.return)
+			var id = 'call_' + (calln++)
+			print(id + ' [shape=record,label="{<self> self|<this> this|<arguments> arguments|<return> return}"]')
+			print(call.self.rep().id + " -> " + id + ':self')
+			print(call.this.rep().id + " -> " + id + ':this')
+			print(call.arguments.rep().id + " -> " + id + ':arguments')
+			print(call.return.rep().id + " -> " + id + ':self')
 		}
 
 		this.visitNode = visitNode
