@@ -805,10 +805,10 @@ function checkCallSignature(call, receiverKey, functionKey, path) {
 	if (functionObj.function.type === 'native')
 		return // do not check natives
 	var analyzer = new Analyzer
-	var ok = analyzer.checkSignature(call, functionKey, receiverKey)
-	if (!ok) {
-		console.log(path + ": does not satisfy signature " + formatTypeCall(call))
-	}
+	var ok = analyzer.checkSignature(call, functionKey, receiverKey, path)
+	// if (!ok) {
+	// 	console.log(path + ": does not satisfy signature " + formatTypeCall(call))
+	// }
 	// if (!isCallSatisfiedByObject(call, {type: 'value', value: {key: receiverKey}}, functionKey)) {
 	// 	console.log(path + ": does not satisfy signature " + formatTypeCall(call))
 	// }
@@ -2415,18 +2415,30 @@ function Analyzer() {
 	//////////////////////////////////////
 	//		  COMPATIBILITY TEST 		//
 	//////////////////////////////////////
+	var errors = []
 	var visited_compatible_nodes = Object.create(null)
 	var node_type_compatible = Object.create(null)
-	function isNodeCompatibleWithType(node, type) {
+	function qualify(path,k) {
+		if (path === null)
+			return path
+		else
+			return path + '.' + k
+	}
+	function reportError(path, msg) {
+		if (!path)
+			return
+		console.log(path + ': ' + msg)
+	}
+	function isNodeCompatibleWithType(node, type, path) {
 		node = node.rep()
 		visited_compatible_nodes[node.id] = node // for graphviz dot output [FIXME: remove after debugging]
 		var h = node.id + "~" + canonicalizeType(type)
 		if (h in node_type_compatible)
 			return node_type_compatible[h]
 		node_type_compatible[h] = true
-		return node_type_compatible[h] = isNodeCompatibleWithTypeX(node, type)
+		return node_type_compatible[h] = isNodeCompatibleWithTypeX(node, type, path)
 	}
-	function isNodeCompatibleWithTypeX(node, type) {
+	function isNodeCompatibleWithTypeX(node, type, path) {
 		node = node.rep()
 		if (node.isAny)
 			return true
@@ -2437,12 +2449,14 @@ function Analyzer() {
 				for (var k in type.properties) {
 					var dst = node.properties.get(k)
 					if (dst) {
-						if (!isNodeCompatibleWithType(dst, type.properties[k].type)) {
+						if (!isNodeCompatibleWithType(dst, type.properties[k].type, qualify(path,k))) {
 							return false
 						}
 					} else {
-						if (!type.properties[k].optional)
+						if (!type.properties[k].optional) {
+							reportError(qualify(path,k), 'expected ' + formatType(type.properties[k].type) + ' but found nothing')
 							return false
+						}
 					}
 				}
 				// TODO: call signatures, indexers, brands(?)
@@ -2454,9 +2468,13 @@ function Analyzer() {
 				if (enum_vals.length === 0) {
 					return true
 				}
-				return enum_vals.some(function(v) {
-					return isNodeCompatibleWithValue(node, v)
+				var ok = enum_vals.some(function(v) {
+					return isNodeCompatibleWithValue(node, v, null)
 				})
+				if (!ok) {
+					reportError(path, 'expected ' + type.name + ' but found ' + formatNodeAsPrimitive(node))
+				}
+				return ok
 			case 'any':
 			case 'void':
 				return true
@@ -2465,9 +2483,13 @@ function Analyzer() {
 			case 'boolean':
 				if (node.primitives.has({type: type.type}))
 					return true
-				return node.primitives.some(function(t) {
+				var ok = node.primitives.some(function(t) {
 					return t.type === 'value' && typeof t.value === type.type
 				})
+				if (!ok) {
+					reportError(path, 'expected ' + formatType(type) + ' but found ' + formatNodeAsPrimitive(node))
+				}
+				return ok
 			default:
 				throw new Error("Unexpected type: " + util.inspect(type))
 		}
@@ -2495,10 +2517,28 @@ function Analyzer() {
 		}
 	}
 	
+	function formatNodeAsPrimitive(node) {
+		if (node.isAny)
+			return 'any'
+		if (node.primitives.length === 0) {
+			if (node.isObject)
+				return 'object'
+			else
+				return 'nothing'
+		}
+		else {
+			var b = []
+			node.primitives.forEach(function(t) {
+				b.push(formatType(t))
+			})
+			return b.join('|')
+		}
+	}
+
 	//////////////////////////////////////
 	//			CHECK SIGNATURE 		//
 	//////////////////////////////////////
-	this.checkSignature = function(sig, function_key, receiver_key) {
+	this.checkSignature = function(sig, function_key, receiver_key, path) {
 		// instantiate the call signature
 		var targs = []
 		sig.typeParameters.forEach(function(tp) {
@@ -2530,7 +2570,7 @@ function Analyzer() {
 		solve()
 
 		var returnNode = sig.new ? call.this : call.return
-		var ok = isNodeCompatibleWithType(returnNode, sig.returnType)
+		var ok = isNodeCompatibleWithType(returnNode, sig.returnType, path + '(' + sig.parameters.map(function(x) {return formatType(x.type)}).join(',') + ')')
 
 		// DEBUGGING: dump to .dot file
 		function dumpGraphviz() {
