@@ -2203,55 +2203,13 @@ function Analyzer() {
 		if (fnode)
 			return fnode
 		fnode = getPristineFunctionNode(fun)
-		resolveInherits() // make function body complete	
+		complete()
 		beginClone()
 		fnode = fnode.clone()
 		endClone()
 		fnode.calls.forEach(resolveCallLater)
 		fnode.inherits.forEach(resolveInheritLater)
 		return function2shared[fun.$id] = fnode
-	}
-
-	function resolveInherits() {
-		// FIXME: handle transitive inheritance
-		complete()
-		var changed = true
-		function unify(x,y) {
-			x = x.rep()
-			y = y.rep()
-			if (x !== y) {
-				unifyLater(x,y)
-				changed = true
-			}
-		}
-		while (changed) {
-			changed = false
-			unresolved_inherits.forEach(function(inh) {
-				var proto = inh.proto.rep()
-				var child = inh.child.rep()
-				if (proto === child)
-					return
-				if (proto.properties.size > child.properties.size) {
-					for (var k in child.properties) {
-						if (k[0] !== '$')
-							continue
-						if (!(k in proto.properties))
-							continue
-						unify(proto.properties[k], child.properties[k])
-					}
-				} else {
-					for (var k in proto.properties) {
-						if (k[0] !== '$')
-							continue
-						if (!(k in child.properties))
-							continue
-						unify(child.properties[k], proto.properties[k])
-					}
-				}
-			})
-			complete()
-		}
-		return changed
 	}
 
 	function solve() {
@@ -2363,6 +2321,10 @@ function Analyzer() {
 			type = resolveTypeRef(type)
 		switch (type.type) {
 			case 'object':
+				if (!node.isObject) {
+					reportError(path, 'expected ' + formatType(type) + ' but found ' + formatNodeAsPrimitive(node))
+					return false
+				}
 				for (var k in type.properties) {
 					var dst = node.properties.get(k)
 					if (dst) {
