@@ -3,6 +3,7 @@ var fs = require('fs');
 var tscore = require('./tscore');
 require('sugar');
 var Map = require('./map');
+var SMap = require('./smap')
 var util = require('util');
 var esprima = require('esprima');
 
@@ -1399,53 +1400,12 @@ function Analyzer() {
 		this.global = false
 		// attributes
 		this.id = ++unode_id
-		this.properties = new Map
+		this.properties = new SMap
 		this.primitives = new TypeSet
 		this.functions = new FunctionSet
 		this.call_sigs = new CallSigSet
 		this.isAny = false
 		this.isObject = false
-		// prototype
-		this.proto = null
-		this.next_sibling = null // nodes with the same prototype are connected by this circularly linked list
-		this.prev_sibling = null
-		this.proto_child = null // any node with this as its prototype
-		// Invariants: 
-		// - proto != this (ie. cannot be prototype of self)
-		// - if proto != null, then next_sibling, prev_sibling form a circularly linked list of nodes whose rep().proto == this.proto
-		// - proto_child points to any node whose rep().proto == this, or null if no such node exists
-		// - proto.property(f) and this.property(f) are unified or the pair is in the worklist
-	}
-	// Runs a callback for each proto-child of this node. The callback may not modify the union-find or prototype data
-	// of any nodes, except freshly created ones. Attributes and cloning may be modified.
-	UNode.prototype.foreachChild = function(fn) {
-		var r = this.rep()
-		if (r.proto_child === null)
-			return
-		var child = r.proto_child = r.proto_child.rep()
-		do {
-			fn(child)
-			child = child.next_sibling.rep()
-		} while (child !== r.proto_child)
-	}
-	UNode.prototype.makeChild = function() {
-		var r = this.rep()
-		var child = new UNode
-		child.proto = r
-		if (r.proto_child === null) {
-			r.proto_child = child
-			child.next_sibling = child.prev_sibling = child
-		} else {
-			r.proto_child = r.proto_child.rep()
-			var xs = r.proto_child.next_sibling.rep()
-			child.next_sibling = xs
-			child.prev_sibling = r.proto_child
-			r.proto_child.next_sibling = child
-			xs.prev_sibling = child
-		}
-		child.properties = r.properties.clone() // easy way to propagate all properties initially
-		child.isObject = true
-		return child
 	}
 	UNode.prototype.rep = function() {
 		var p = this.parent
@@ -1461,10 +1421,6 @@ function Analyzer() {
 			r.properties.put(name, n)
 			n.isAny = r.isAny
 			n.global = r.global
-			// propagate to proto children
-			r.foreachChild(function(child) {
-				unifyLater(n, child.getPrty(name))
-			})
 		}
 		return n
 	}
@@ -1485,20 +1441,6 @@ function Analyzer() {
 			r.properties.forEach(function(name,dst) {
 				target.properties.put(name, dst.clone())
 			})
-			if (r.proto) {
-				target.proto = r.proto.clone()
-				if (target.proto.proto_child === null) {
-					target.proto.proto_child = target
-					target.next_sibling = target.prev_sibling = target
-				} else {
-					var x = target.proto.proto_child.rep()
-					var y = x.next_sibling.rep()
-					x.next_sibling = target
-					target.prev_sibling = x
-					target.next_sibling = y
-					y.prev_sibling = target
-				}
-			}
 			return target
 		}
 	}
@@ -1527,23 +1469,6 @@ function Analyzer() {
 		if (n1 === n2)
 			return
 
-		// unifying objects with different prototypes should be done later
-		if (n1.proto && n2.proto && n1.proto.rep() !== n2.proto.rep()) {
-			complexUnifyLater(n1, n2)
-			return
-		}
-
-		n1.foreachChild(function(child) {
-			n2.properties.forEach(function(name,dst) {
-				unifyLater(dst, child.getPrty(name))
-			})
-		})
-		n2.foreachChild(function(child) {
-			n1.properties.forEach(function(name,dst) {
-				unifyLater(dst, child.getPrty(name))
-			})
-		})
-
 		if (n2.isAny && !n1.isAny) {
 			n1.makeAny()
 		}
@@ -1566,50 +1491,26 @@ function Analyzer() {
 		n2.parent = n1
 		
 		// merge properties
-		for (var k in n2.properties) {
+		var big, small;
+		if (n1.properties.size >= n2.properties.size) {
+			big = n1.properties
+			small = n2.properties
+		} else {
+			big = n2.properties
+			small = n1.properties
+			n1.properties = big
+		}
+		for (var k in small) {
 			if (k[0] !== '$')
 				continue
-			var p2 = n2.properties[k]
-			if (k in n1.properties) {
-				var p1 = n1.properties[k]
+			var p2 = small[k]
+			if (k in big) {
+				var p1 = big[k]
 				unifyLater(p1, p2)
 			} else {
-				n1.properties[k] = p2
+				big[k] = p2
+				big.size++
 			}
-		}
-
-		// prototype
-		if (n2.proto) { // note: only one of these can have a non-null prototype unless they are the same
-			n1.proto = n2.proto
-			n1.next_sibling = n2.next_sibling
-			n1.prev_sibling = n2.prev_sibling
-		}
-		if (n1.proto && n1.proto.rep() === n1) {
-			var x = n1.next_sibling.rep()
-			var y = n1.prev_sibling.rep()
-			if (x === n1) {
-				n1.next_sibling = n1.prev_sibling = n1.proto = n1.proto_child = null
-			} else {
-				x.next_sibling = y
-				y.prev_sibling = x
-				n1.proto_child = x
-				n1.next_sibling = null
-				n1.prev_sibling = null
-				n1.proto = null
-			}
-		}
-		if (n1.proto_child && n2.proto_child) {
-			var x1 = n1.proto_child.rep()
-			var x2 = x1.next_sibling.rep()
-			var y1 = n2.proto_child.rep()
-			var y2 = y1.next_sibling.rep()
-			x1.next_sibling = y2
-			y2.prev_sibling = x1
-			y1.next_sibling = x2
-			x2.prev_sibling = y1
-		}
-		else if (n2.proto_child) {
-			n1.proto_child = n2.proto_child
 		}
 
 		// merge other attributes
@@ -1639,92 +1540,6 @@ function Analyzer() {
 			var n1 = queue.pop()
 			var n2 = queue.pop()
 			unifyNow(n1, n2)
-		}
-	}
-
-	function inheritsFrom(x, y) {
-		x = x.rep()
-		y = y.rep()
-		var fast = x
-		var slow = x
-		while (true) {
-			fast = fast.proto
-			if (!fast)
-				return false
-			fast = fast.rep()
-			if (fast === y)
-				return true
-			fast = fast.proto
-			if (!fast)
-				return false
-			fast = fast.rep()
-			if (fast === y)
-				return true
-			slow = slow.proto.rep()
-			if (slow === fast)
-				return false
-		}
-	}
-	// var include_graphviz = []
-	function complexUnify(n1, n2) {
-		n1 = n1.rep()
-		n2 = n2.rep()
-		if (n1 === n2)
-			return
-		// include_graphviz.push(n1)
-		if (!n1.proto || !n2.proto || n1.proto.rep() === n2.proto.rep()) {
-			unifyNow(n1, n2)
-			return
-		}
-		n1.proto = n1.proto.rep()
-		n2.proto = n2.proto.rep()
-
-		function removePrototype(n1) {
-			var x = n1.prev_sibling.rep()
-			var y = n1.next_sibling.rep()
-			if (n1 === x) {
-				n1.proto.proto_child = null
-			} else {
-				n1.proto.proto_child = x
-				x.next_sibling = y
-				y.prev_sibling = x
-			}
-			n1.next_sibling = n1.prev_sibling = n1.proto = null
-		}
-
-		// check if one prototype inherits directly from the other
-		if (inheritsFrom(n1.proto, n2.proto)) {
-			removePrototype(n2)
-			unifyNow(n1,n2)
-		}
-		else if (inheritsFrom(n2.proto, n1.proto)) {
-			removePrototype(n1)
-			unifyNow(n1,n2)
-		}
-		else {
-			// abandon both prototypes, unify the nodes, and mark them both as 'any'
-			removePrototype(n1)
-			removePrototype(n2)
-			n1.makeAny()
-			n2.makeAny()
-			unifyNow(n1,n2)
-		}
-	}
-
-	var complexQueue = []
-	function complexUnifyLater(n1, n2) {
-		if (n1 !== n2) {
-			complexQueue.push(n1)
-			complexQueue.push(n2)
-		}
-	}
-	function complexComplete() {
-		complete()
-		while (complexQueue.length > 0) {
-			var n1 = complexQueue.pop()
-			var n2 = complexQueue.pop()
-			complexUnify(n1, n2)
-			complete()
 		}
 	}
 
@@ -1907,7 +1722,7 @@ function Analyzer() {
 		}
 
 		function addNodePrototype(n, proto) {
-			unify(n, getNode(proto).makeChild())
+			// unify(n, getNode(proto).makeChild())
 		}
 		function addNativePrototype(n, path) {
 			addNodePrototype(n, getConcreteObject(lookupPath(path).key))
@@ -2359,7 +2174,7 @@ function Analyzer() {
 		if (fnode)
 			return fnode
 		fnode = getPristineFunctionNode(fun)
-		complexComplete() // make function body complete	
+		complete() // make function body complete	
 		beginClone()
 		fnode = fnode.clone()
 		endClone()
@@ -2370,7 +2185,7 @@ function Analyzer() {
 	// var include_calls = []
 	function solve() {
 		// var fnodes = []
-		complexComplete()
+		complete()
 		unresolved_calls = unresolved_calls.concat(unresolved_calls)
 		while (unresolved_calls.length > 0) {
 			var call = unresolved_calls.pop()
@@ -2401,7 +2216,7 @@ function Analyzer() {
 						break; // do nothing
 				}
 			})
-			complexComplete()
+			complete()
 		}
 		// fnodes.forEach(function(fnode) {
 		// 	graphviz.visitFNode(fnode)
@@ -2658,7 +2473,7 @@ function Analyzer() {
 			visitNode(call.arguments)
 			visitNode(call.return)
 			var id = 'call_' + (calln++)
-			print(id + ' [shape=record,label="{<self> self|<this> this|<arguments> arguments|<return> return}"]')
+			print(id + ' [shape=record,label="{{<self> self|<this> this|<arguments> arguments|<return> return}}"]')
 			print(call.self.rep().id + " -> " + id + ':self')
 			print(call.this.rep().id + " -> " + id + ':this')
 			print(call.arguments.rep().id + " -> " + id + ':arguments')
