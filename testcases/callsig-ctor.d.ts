@@ -14,4 +14,5 @@ declare class bad {
 
 	getX(): number;
 	getY(): string;
+	getW(): boolean;
 }

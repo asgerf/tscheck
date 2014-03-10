@@ -68,6 +68,30 @@ SMap.prototype.mapv = function(callback) {
     result.size = this.size
     return result
 }
+SMap.prototype.some = function(callback) {
+    for (var k in this) {
+        if (k[0] !== '$') {
+            continue;
+        }
+        var x = callback(k.substring(1), this[k])
+        if (x) {
+            return x
+        }
+    }
+    return null
+};
+SMap.prototype.find = SMap.prototype.some
+SMap.prototype.all = function(callback) {
+    for (var k in this) {
+        if (k[0] !== '$') {
+            continue;
+        }
+        if (!callback(k.substring(1), this[k])) {
+            return false
+        }
+    }
+    return true
+};
 SMap.prototype.clone = function() {
     var result = new SMap
     for (var k in this) {

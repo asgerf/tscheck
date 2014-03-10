@@ -58,6 +58,30 @@ Map.prototype.mapv = function(callback) {
     }
     return result
 }
+Map.prototype.some = function(callback) {
+    for (var k in this) {
+        if (!this.hasOwnProperty(k)) {
+            continue;
+        }
+        var x = callback(k.substring(1), this[k])
+        if (x) {
+            return x
+        }
+    }
+    return null
+};
+Map.prototype.find = Map.prototype.some
+Map.prototype.all = function(callback) {
+    for (var k in this) {
+        if (!this.hasOwnProperty(k)) {
+            continue;
+        }
+        if (!callback(k.substring(1), this[k])) {
+            return false
+        }
+    }
+    return true
+};
 Map.prototype.clone = function() {
     var result = new Map
     for (var k in this) {

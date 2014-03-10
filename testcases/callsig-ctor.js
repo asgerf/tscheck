@@ -8,5 +8,8 @@ good.prototype.getX = function() {
 good.prototype.getY = function() {
 	return this.y;
 }
+good.prototype.getW = function() {
+	return this.x;
+}
 
 var bad = good;

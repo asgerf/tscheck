@@ -1218,6 +1218,20 @@ HashSet.prototype.clone = function() {
 	}
 	return r
 }
+HashSet.prototype.isEmpty = function() {
+	for (var k in this) {
+		if (this.hasOwnProperty(k))
+			return false
+	}
+	return true
+}
+HashSet.prototype.first = function() {
+	for (var k in this) {
+		if (this.hasOwnProperty(k))
+			return this[k]
+	}
+	return null
+}
 
 function TypeSet() {}
 TypeSet.prototype = Object.create(HashSet.prototype)
@@ -2295,7 +2309,7 @@ function Analyzer() {
 	var node_type_compatible = Object.create(null)
 	function qualify(path,k) {
 		if (path === null)
-			return path
+			return null
 		else
 			return path + '.' + k
 	}
@@ -2304,19 +2318,33 @@ function Analyzer() {
 			return
 		console.log(path + ': ' + msg)
 	}
-	function isNodeCompatibleWithType(node, type, path) {
-		node = node.rep()
-		visited_compatible_nodes[node.id] = node // for graphviz dot output [FIXME: remove after debugging]
-		var h = node.id + "~" + canonicalizeType(type)
-		if (h in node_type_compatible)
-			return node_type_compatible[h]
-		node_type_compatible[h] = true
-		return node_type_compatible[h] = isNodeCompatibleWithTypeX(node, type, path)
+	function isMethod(call) {
+		return !call.new
 	}
-	function isNodeCompatibleWithTypeX(node, type, path) {
+	function typeNeedsReceiver(type) {
+		if (type.type === 'reference')
+			type = typeDecl.env[type.name].object
+		return type.type === 'object' && type.calls.some(isMethod)
+	}
+	function isNodeCompatibleWithType(node, receiver, type, path, manyErrors) {
+		node = node.rep()
+		receiver = receiver && receiver.rep()
+		visited_compatible_nodes[node.id] = node // for graphviz dot output [FIXME: remove after debugging]
+		var h = canonicalizeType(type) + "~" + node.id
+		if (typeNeedsReceiver(type)) {
+			h += '.' + (receiver ? receiver.id : 'A')
+		}
+		if (h in node_type_compatible) {
+			return node_type_compatible[h]
+		}
+		node_type_compatible[h] = true
+		return node_type_compatible[h] = isNodeCompatibleWithTypeX(node, receiver, type, path, manyErrors)
+	}
+	function isNodeCompatibleWithTypeX(node, receiver, type, path, manyErrors) {
 		node = node.rep()
 		if (node.isAny)
 			return true
+		var ok = true
 		if (type.type === 'reference')
 			type = resolveTypeRef(type)
 		switch (type.type) {
@@ -2328,18 +2356,69 @@ function Analyzer() {
 				for (var k in type.properties) {
 					var dst = node.properties.get(k)
 					if (dst) {
-						if (!isNodeCompatibleWithType(dst, type.properties[k].type, qualify(path,k))) {
+						ok &= isNodeCompatibleWithType(dst, node, type.properties[k].type, qualify(path,k), false)
+						if (!ok && !manyErrors) {
 							return false
 						}
 					} else {
 						if (!type.properties[k].optional) {
 							reportError(qualify(path,k), 'expected ' + formatType(type.properties[k].type) + ' but found nothing')
-							return false
+							ok = false
+							if (!manyErrors)
+								return false
 						}
 					}
 				}
-				// TODO: call signatures, indexers, brands(?)
-				return true
+				if (type.numberIndexer) {
+					if (manyErrors) {
+						node.properties.forEach(function(name,dst) {
+							if (isNumberString(name)) {
+								ok &= isNodeCompatibleWithType(dst, node, type.numberIndexer, false)
+							}
+						})
+					} else {
+						ok &= node.properties.all(function(name,dst) {
+							if (!isNumberString(name))
+								return true
+							return isNodeCompatibleWithType(dst, node, type.numberIndexer, false)
+						})
+						if (!ok)
+							return false
+					}
+				}
+				if (type.stringIndexer) {
+					if (manyErrors) {
+						node.properties.forEach(function(name,dst) {
+							// FIXME: enumerability check?
+							ok &= isNodeCompatibleWithType(dst, node, type.stringIndexer, false)
+						})
+					} else {
+						ok &= node.properties.all(function(name,dst) {
+							// FIXME: enumerability check?
+							return isNodeCompatibleWithType(dst, node, type.stringIndexer, false)
+						})
+						if (!ok)
+							return false
+					}
+				}
+				if (type.calls.length > 0 && node.functions.isEmpty()) {
+					reportError(path, 'expected ' + formatTypeCall(type.calls[0]) + ' but found non-function object')
+					ok = false
+					if (!manyErrors)
+						return false
+				} else if (!manyErrors) {
+					ok &= type.calls.all(function(sig) {
+						return isNodeCompatibleWithCallSig(node, receiver, sig, path)
+					})
+					if (!ok)
+						return false
+				} else {
+					type.calls.forEach(function(call) {
+						ok &= isNodeCompatibleWithCallSig(node, receiver, sig, path)
+					})
+				}
+				// TODO: brands(?)
+				return ok
 			case 'node':
 				return node === type.node.rep()
 			case 'enum':
@@ -2417,7 +2496,19 @@ function Analyzer() {
 	//////////////////////////////////////
 	//			CHECK SIGNATURE 		//
 	//////////////////////////////////////
-	this.checkSignature = function(sig, function_key, receiver_key, path) {
+	var node_callsig_compatible = Object.create(null)
+	function isNodeCompatibleWithCallSig(function_node, receiver_node, sig, path) {
+		function_node = function_node.rep()
+		receiver_node = receiver_node && receiver_node.rep()
+
+		var h = canonicalizeCall(sig) + "~" + function_node.id
+		if (!sig.new) {
+			h += '.' + (receiver_node ? receiver_node.id : 'A')
+		}
+		if (h in node_callsig_compatible)
+			return node_callsig_compatible[h]
+		node_callsig_compatible[h] = true
+
 		// instantiate the call signature
 		var targs = []
 		sig.typeParameters.forEach(function(tp) {
@@ -2434,11 +2525,14 @@ function Analyzer() {
 
 		// create a call node
 		var call = new CallNode()
-		call.self = getConcreteObject(function_key)
+		call.self = function_node
 		if (sig.new) {
-			call.this = getConcreteObject(function_key).getPrty("prototype") // TODO: better handling of prototypes
+			call.this = function_node.getPrty("prototype") // TODO: better handling of prototypes
 		} else {
-			call.this = getConcreteObject(receiver_key)
+			if (receiver_node)
+				call.this = receiver_node
+			else
+				call.this.makeAny()
 		}
 		sig.parameters.forEach(function(parm,i) {
 			unifyNow(call.arguments.getPrty(String(i)), makeType(parm.type))
@@ -2455,7 +2549,7 @@ function Analyzer() {
 		} else {
 			qpath = path + '(' + sig.parameters.map(function(x) {return formatType(x.type)}).join(',') + ')'
 		}
-		var ok = isNodeCompatibleWithType(returnNode, sig.returnType, qpath)
+		var ok = isNodeCompatibleWithType(returnNode, null, sig.returnType, qpath, sig.new)
 
 		// DEBUGGING: dump to .dot file
 		function dumpGraphviz() {
@@ -2478,7 +2572,10 @@ function Analyzer() {
 		}
 		// dumpGraphviz()
 
-		return ok
+		return node_callsig_compatible[h] = ok
+	}
+	this.checkSignature = function(sig, function_key, receiver_key, path) {
+		return isNodeCompatibleWithCallSig(getConcreteObject(function_key), getConcreteObject(receiver_key), sig, path)
 	}
 	
 	//////////////////////////////////////
