@@ -381,25 +381,6 @@ function substType(type, tenv) {
 	}
 }
 
-function instantiateCall(call, targs) {
-	if (targs.length !== call.typeParameters.length)
-		throw new Error("Given " + targs.length + " type arguments to call " + formatTypeCall(call))
-	if (targs.length === 0)
-		return call // optimization
-	var tenv = new Map
-	call.typeParameters.forEach(function(tp,i) {
-		tenv.put(tp.name, targs[i])
-	})
-	return {
-		new: call.new,
-		variadic: call.variadic,
-		typeParameters: [],
-		parameters: call.parameters.map(substParameter.fill(undefined, tenv)),
-		returnType: substType(call.returnType, tenv),
-		meta: call.meta
-	}
-}
-
 // ---------------------------------
 // 		 Type Canonicalization
 // ---------------------------------
@@ -1128,7 +1109,7 @@ function formatType(type) {
 		case 'value':
 			return 'value(' + formatValue(type.value) + ')'
 		case 'node':
-			return '#' + type.node.rep().id
+			return '#' + type.name
 	}
 	return util.inspect(type)
 }
@@ -2196,6 +2177,8 @@ function Analyzer() {
 					var node = new UNode
 					node.makeAny()
 					return node
+				case 'type-param':
+					throw new Error("Type parameter " + t.name + " in makeType")
 				default:
 					var node = new UNode
 					node.primitives.add(t)
@@ -2420,7 +2403,11 @@ function Analyzer() {
 				// TODO: brands(?)
 				return ok
 			case 'node':
-				return node === type.node.rep()
+				ok = (node === type.node.rep())
+				if (!ok) {
+					reportError(path, "expected generic type " + type.name + " but found " + formatNode(node))
+				}
+				return ok
 			case 'enum':
 				var enum_vals = enum_values.get(type.name)
 				if (enum_vals.length === 0) {
@@ -2474,33 +2461,34 @@ function Analyzer() {
 				throw new Error("Unexpected value: " + util.inspect(v))
 		}
 	}
-	
-	function formatNodeAsPrimitive(node) {
-		if (node.isAny)
-			return 'any'
-		var b = []
-		node.primitives.forEach(function(t) {
-			b.push(formatType(t))
+
+	function instantiateCall(call) {
+		if (call.typeParameters.length === 0)
+			return call
+		var tenv = new Map
+		call.typeParameters.forEach(function(tp,i) {
+			var node = new UNode
+			tenv.put(tp.name, {type:'node', node:node, name:tp.name})
+			if (tp.constraint) {
+				unifyNow(makeType(substType(tp.constraint, tenv)), node)
+			}
 		})
-		if (b.length === 0) {
-			if (node.isObject)
-				return 'object'
-			else
-				return 'nothing'
-		}
-		else {
-			return b.join('|')
+		return {
+			new: call.new,
+			variadic: call.variadic,
+			typeParameters: [],
+			parameters: call.parameters.map(substParameter.fill(undefined, tenv)),
+			returnType: substType(call.returnType, tenv),
+			meta: call.meta
 		}
 	}
 
-	//////////////////////////////////////
-	//			CHECK SIGNATURE 		//
-	//////////////////////////////////////
 	var node_callsig_compatible = Object.create(null)
 	function isNodeCompatibleWithCallSig(function_node, receiver_node, sig, path) {
 		function_node = function_node.rep()
 		receiver_node = receiver_node && receiver_node.rep()
 
+		// memoize
 		var h = canonicalizeCall(sig) + "~" + function_node.id
 		if (!sig.new) {
 			h += '.' + (receiver_node ? receiver_node.id : 'A')
@@ -2510,18 +2498,7 @@ function Analyzer() {
 		node_callsig_compatible[h] = true
 
 		// instantiate the call signature
-		var targs = []
-		sig.typeParameters.forEach(function(tp) {
-			var node
-			if (tp.constraint) {
-				var c = substType(tp.constraint, tenv)
-				node = makeType(c)
-			} else {
-				node = new UNode
-			}
-			targs.push({type: 'node', node:node})
-		})
-		sig = instantiateCall(sig, targs)
+		sig = instantiateCall(sig)
 
 		// create a call node
 		var call = new CallNode()
@@ -2574,6 +2551,44 @@ function Analyzer() {
 
 		return node_callsig_compatible[h] = ok
 	}
+	
+	function formatNodeAsPrimitive(node) {
+		if (node.isAny)
+			return 'any'
+		var b = []
+		node.primitives.forEach(function(t) {
+			b.push(formatType(t))
+		})
+		if (b.length === 0) {
+			if (node.isObject)
+				return 'object'
+			else
+				return 'nothing'
+		}
+		else {
+			return b.join('|')
+		}
+	}
+	function formatNode(node) {
+		if (node.isAny)
+			return 'any'
+		var b = []
+		if (node.isObject)
+			b.push('object')
+		node.primitives.forEach(function(t) {
+			b.push(formatType(t))
+		})
+		if (b.length === 0) {
+			return 'nothing'
+		} else {
+			return b.join('|')
+		}
+	}
+
+	//////////////////////////////////////
+	//			CHECK SIGNATURE 		//
+	//////////////////////////////////////
+
 	this.checkSignature = function(sig, function_key, receiver_key, path) {
 		return isNodeCompatibleWithCallSig(getConcreteObject(function_key), getConcreteObject(receiver_key), sig, path)
 	}
