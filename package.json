@@ -1,8 +1,8 @@
 {
-	"dependencies": {
-		"sugar": "",
-		"commander": "",
-		"esprima": "",
-		"escodegen": ""
-	}
+  "dependencies": {
+    "sugar": "",
+    "commander": "",
+    "esprima": "~1.0.4",
+    "escodegen": ""
+  }
 }

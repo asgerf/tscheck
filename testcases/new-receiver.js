@@ -6,7 +6,7 @@ Foo.prototype.bar = function() {
 }
 
 function good() {
-	return new Foo(4);
+	return new Foo(5);
 }
 function bad() {
 	return new Foo("str");

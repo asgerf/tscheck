@@ -1446,8 +1446,20 @@ onLoaded(function() {
 	}	
 })
 
+var graphvizCounter = 0;
 function Analyzer() {
 	var queue = []
+
+	// DEBUGGING MATERIALS
+	var graphviz = new Graphviz
+	var graphviz_functions = []
+	var graphviz_nodes = []
+	function includeFunctionInGraphviz(x) {
+		graphviz_functions.push(x)
+	}
+	function includeNodeInGraphviz(x) {
+		graphviz_nodes.push(x)
+	}
 
 	//////////////////////////
 	// 		UNIFICATION		//
@@ -1461,8 +1473,11 @@ function Analyzer() {
 	function endClone() {
 	}
 
+	var all_unodes = []
 	var unode_id = 0
 	function UNode() {
+		// all_unodes.push(this) // TODO: remove when not debuggin
+
 		// union-find information
 		this.parent = this
 		this.rank = 0
@@ -1475,11 +1490,11 @@ function Analyzer() {
 		this._properties = new SMap
 		this._primitives = new TypeSet
 		this._functions = new FunctionSet
-		this._call_sigs = [] // array of CallSigNode
+		this._call_sigs = new CallSigSet
+		this._resolved_refs = new TypeSet
+		this._prototypes = []
 		this._isAny = false
 		this._isObject = false
-		// if (unode_id % 1000 === 0)
-		// 	console.trace("new UNode")
 	}
 	UNode.prototype = {
 		get id() { return this.rep()._id },
@@ -1487,6 +1502,8 @@ function Analyzer() {
 		get primitives() { return this.rep()._primitives },
 		get functions() { return this.rep()._functions },
 		get call_sigs() { return this.rep()._call_sigs },
+		get resolved_refs() { return this.rep()._resolved_refs },
+		get prototypes() { return this.rep()._prototypes },
 		get isAny() { return this.rep()._isAny },
 		set isAny(x) { this.rep()._isAny = x },
 		get isObject() { return this.rep()._isObject },
@@ -1500,12 +1517,33 @@ function Analyzer() {
 	};
 	UNode.prototype.getPrty = function(name) {
 		var r = this.rep()
-		var n = r.properties.get(name)
-		if (!n) {
+		var wasEmpty = r.properties.size === 0
+		var p = r.properties.get(name)
+		var n;
+		if (!p) {
 			n = new UNode
-			r.properties.put(name, n)
+			r.properties.put(name, {type: 'node', node: n})
 			n.isAny = r.isAny
 			n.global = r.global
+		} else if (p.type === 'node') {
+			n = p.node
+		} else {
+			n = new UNode
+			p.types.forEach(function(t) {
+				n.addType(t)
+			})
+			n.isAny = r.isAny
+			n.global = r.global
+			r.properties.put(name, {type: 'node', node: n})
+		}
+		// if this is the first time the node is being used as an object, add the relevant coerced types
+		if (wasEmpty) {
+			r.primitives.forEach(function(t) {
+				var coerced = primitiveToObjectType(t)
+				if (coerced) {
+					r.addType(coerced)
+				}
+			})
 		}
 		return n
 	}
@@ -1521,10 +1559,15 @@ function Analyzer() {
 			target._primitives = r.primitives.clone()
 			target._functions = r.functions.clone()
 			target._call_sigs = r.call_sigs.clone()
+			target._resolved_refs = r._resolved_refs.clone()
+			target._prototypes = r._prototypes.map(function(x) { return x.clone() })
 			target._isObject = r.isObject
 			target._isAny = r.isAny
 			r.properties.forEach(function(name,dst) {
-				target.properties.put(name, dst.clone())
+				if (dst.type === 'node')
+					target.properties.put(name, {type: 'node', node: dst.node.clone()})
+				else
+					target.properties.put(name, {type: 'union', types: dst.types.clone()})
 			})
 			return target
 		}
@@ -1544,8 +1587,91 @@ function Analyzer() {
 			return
 		r.global = true
 		r.properties.forEach(function(name,dst) {
-			dst.makeGlobal()
+			if (dst.type === 'node')
+				dst.node.makeGlobal()
 		})
+	}
+	function primitiveToObjectType(t) {
+		var typ = t.type === 'value' ? (typeof t.value) : t.type
+		switch (typ) {
+			case 'number':
+				return {type: 'reference', name:'Number', typeArguments:[]}
+			case 'string':
+			case 'string-const':
+				return {type: 'reference', name:'String', typeArguments:[]}
+			case 'boolean':
+				return {type: 'reference', name:'Boolean', typeArguments:[]}
+			default:
+				return null
+		}
+	}
+	UNode.prototype.addType = function(t) {
+		var self = this
+		if (this.parent !== this) {
+			this.rep().addType(t)
+			return
+		}
+		switch (t.type) {
+			case 'node':
+				unifyLater(this, t.node)
+				break;
+			case 'any':
+				this.makeAny();
+				break;
+			case 'reference':
+				if (this.resolved_refs.add(t)) {
+					this.addType(resolveTypeRef(t))
+				}
+				break;
+			case 'object':
+				this.isObject = true
+				for (var k in t.properties) {
+					var dst = this.properties.get(k)
+					if (dst) {
+						if (dst.type === 'node') {
+							dst.node.addType(t.properties[k].type)
+						} else if (dst.type === 'union') {
+							dst.types.add(t.properties[k].type)
+						} else {
+							throw new Error("Unexpected property type: " + util.inspect(dst))
+						}
+					} else {
+						var ut = {
+							type: 'union',
+							types: new TypeSet
+						}
+						ut.types.add(t.properties[k].type)
+						this.properties.put(k, ut)
+					}
+				}
+				t.calls.forEach(function(call) {
+					self.call_sigs.add(call)
+				})
+				// TODO: indexers, brands
+				break;
+			case 'number':
+			case 'string':
+			case 'boolean':
+			case 'void':
+			case 'value':
+				this.primitives.add(t)
+				break;
+			case 'string-const':
+				this.primitives.add({type: 'value', value: t.value})
+				break;
+			case 'enum':
+				this.makeAny(); // TODO: proper handling of enums
+				break;
+			default:
+				throw new Error("Unexpected type: " + t.type)
+		}
+		// whenever we add a primitive type to a node that is being used as an object, also add its coerced type
+		if (this.properties.size > 0) {
+			var coerced = primitiveToObjectType(t)
+			if (coerced) {
+				this.addType(coerced)
+			}	
+		}
 	}
 
 	function unifyNow(n1, n2) {
@@ -1591,7 +1717,24 @@ function Analyzer() {
 			var p2 = small[k]
 			if (k in big) {
 				var p1 = big[k]
-				unifyLater(p1, p2)
+				if (p1.type === 'node') {
+					if (p2.type === 'node') {
+						unifyLater(p1.node, p2.node)
+					} else {
+						p2.types.forEach(function(t) {
+							addTypeLater(p1.node, t)
+						})
+					}
+				} else {
+					if (p2.type === 'node') {
+						big[k] = p2
+						p1.types.forEach(function(t) {
+							addTypeLater(p2.node, t)
+						})
+					} else {
+						p1.types.addAll(p2.types)
+					}
+				}
 			} else {
 				big[k] = p2
 				big.size++
@@ -1602,7 +1745,9 @@ function Analyzer() {
 		n1._id = Math.min(n1._id, n2._id)
 		n1._functions.addAll(n2._functions)
 		n1._primitives.addAll(n2._primitives)
-		n1._call_sigs = mergeArrays(n1._call_sigs, n2._call_sigs)
+		n1._call_sigs.addAll(n2._call_sigs)
+		n1._resolved_refs.addAll(n2._resolved_refs)
+		n1._prototypes = mergeArrays(n1._prototypes, n2._prototypes)
 		n1._isObject |= n2._isObject
 		n1._isAny |= n2._isAny
 		n1.global |= n2.global
@@ -1617,6 +1762,11 @@ function Analyzer() {
 		return xs.concat(ys) // TODO: faster destructive merge
 	}
 
+	function addTypeLater(node, type) {
+		queue.push(type)
+		queue.push(node)
+	}
+
 	function unifyLater(n1, n2) {
 		if (n1 !== n2) {
 			queue.push(n1)
@@ -1626,9 +1776,13 @@ function Analyzer() {
 
 	function complete() {
 		while (queue.length > 0) {
-			var n1 = queue.pop()
-			var n2 = queue.pop()
-			unifyNow(n1, n2)
+			var x = queue.pop()
+			var y = queue.pop()
+			if (y instanceof UNode) {
+				unifyNow(x, y)
+			} else {
+				x.addType(y)
+			}
 		}
 	}
 
@@ -1677,13 +1831,13 @@ function Analyzer() {
 		return call
 	}
 
-	function InheritNode(proto, child) {
-		this.proto = proto
-		this.child = child
-	}
-	InheritNode.prototype.clone = function() {
-		return new InheritNode(this.proto.clone(), this.child.clone())
-	}
+	// function InheritNode(proto, child) {
+	// 	this.proto = proto
+	// 	this.child = child
+	// }
+	// InheritNode.prototype.clone = function() {
+	// 	return new InheritNode(this.proto.clone(), this.child.clone())
+	// }
 
 	var next_callsig_id = 1
 	function CallSigNode(sig) {
@@ -1699,8 +1853,8 @@ function Analyzer() {
 		unresolved_calls.push(call)
 	}
 	var unresolved_inherits = []
-	function resolveInheritLater(inherit) {
-		unresolved_inherits.push(inherit)
+	function resolveInheritLater(node) {
+		unresolved_inherits.push(node)
 	}
 
 	//////////////////////////////////////
@@ -1729,13 +1883,15 @@ function Analyzer() {
 				return
 			var n = object2node[i].rep()
 			if (obj.env) {
+				// console.log("Unifying environment")
+				includeNodeInGraphviz(n)
 				unifyNow(n.getPrty(ENV), getConcreteObject(obj.env.key))
 			}
 			obj.propertyMap.forEach(function(name,prty) {
 				n = n.rep()
 				if ('value' in prty) {
 					if (prty.value && typeof prty.value === 'object') {
-						n.properties.put(name, object2node[prty.value.key])
+						n.properties.put(name, {type: 'node', node: object2node[prty.value.key]})
 					} else {
 						n.getPrty(name).primitives.add({type: 'value', value:prty.value})
 					}
@@ -1765,6 +1921,7 @@ function Analyzer() {
 		else {
 			var node = new UNode
 			node.primitives.add({type:'value', value:value})
+			return node
 		}
 	}
 	buildHeap() 
@@ -1839,8 +1996,9 @@ function Analyzer() {
 		}
 
 		function addNodePrototype(n, proto) {
-			fnode.inherits.push(new InheritNode(getNode(proto), getNode(n)))
-			// unify(n, getNode(proto).makeChild())
+			n = getNode(n)
+			n.prototypes.push(getNode(proto))
+			fnode.inherits.push(n)
 		}
 		function addNativePrototype(n, path) {
 			addNodePrototype(n, getConcreteObject(lookupPath(path).key))
@@ -2228,198 +2386,10 @@ function Analyzer() {
 	//////////////////////////////////
 	// 		TYPES -> U-NODES		//
 	//////////////////////////////////
-
-
-	function CheckNode(check) {
-		this.check = check
-		this.children = []
-	}
-	var check_stack = [new CheckNode(null)]
-
-	function pushNoCheck() {
-		check_stack.push(null)
-	}
-	function pushCheck(check) {
-		if (check && check.path === null)
-			check = null
-		if (check_stack.last() === null) {
-			check_stack.push(null)
-			return
-		}
-		var cnode = new CheckNode(check)
-		check_stack.last().children.push(cnode)
-		check_stack.push(cnode)
-	}
-	function popCheck() {
-		check_stack.pop()
-	}
 	
-	var type2node = Object.create(null)		
-	function visitCovariantType(t, self, path) {
-		if (t === null) { // for incomplete .d.ts files, ideally should not happen
-			// var n = new UNode; n.makeAny(); return n;
-			throw new Error
-		} 
-		switch (t.type) {
-			case 'reference':
-				var h = '+' + canonicalizeType(t)
-				if (h in type2node) {
-					unifyNow(self, type2node[h])
-					return
-				}
-				type2node[h] = self
-				visitCovariantType(resolveTypeRef(t), self, null, path)
-				break
-			case 'object':
-				self.isObject = true
-				for (var k in t.properties) {
-					visitCovariantType(t.properties[k].type, self.getPrty(k), qualify(path, k))
-				}
-				t.calls.forEach(function(sig) {
-					visitCovariantCallSig(sig, self, path)
-				})
-				// TODO: string indexers and number indexers
-				break
-			case 'enum':
-				var enum_vals = enum_values.get(t.name)
-				if (enum_vals.length === 0) {
-					self.makeAny()
-				} else {
-					enum_vals.forEach(function(v) {
-						unifyNow(self, getNodeForValue(v))
-					})
-				}
-				break
-			case 'node':
-				unifyNow(self, t.node)
-				break
-			case 'any':
-				self.makeAny()
-				break
-			case 'type-param':
-				throw new Error("Type parameter " + t.name + " in makeType")
-			case 'string-const':
-				self.primitives.add({type: 'value', value: t.value})
-				resolveInheritLater(new InheritNode(getConcreteObject(StringPrototype.key), self)) // FIXME: problem with cloning??
-				break
-			case 'string':
-				self.primitives.add(t)
-				resolveInheritLater(new InheritNode(getConcreteObject(StringPrototype.key), self))
-				break
-			case 'boolean':
-				self.primitives.add(t)
-				resolveInheritLater(new InheritNode(getConcreteObject(BooleanPrototype.key), self))
-				break
-			case 'number':
-				self.primitives.add(t)
-				resolveInheritLater(new InheritNode(getConcreteObject(NumberPrototype.key), self))
-				break
-			case 'void':
-				self.primitives.add(t)
-				break
-			default:
-				throw new Error("Unexpected type: " + util.inspect(t))
-		}
-	}
-	function visitCovariantCallSig(sig, self, path) {
-		self = self.rep()
-		var signode = new CallSigNode(sig)
-		self.call_sigs.push(signode)
-		sig = instantiateCovariantCallSig(sig, signode.fnode, path)
-		sig.parameters.forEach(function(parm,i) {
-			visitContravariantType(parm.type, signode.fnode.arguments.getPrty(String(i)), null, signode.fnode, null)
-		})
-		visitCovariantType(sig.returnType, signode.fnode.return, qualify(path, sig2path(sig)))
-	}
-	function instantiateCovariantCallSig(sig, fnode, path) {
-		if (sig.typeParameters.length === 0)
-			return sig
-		var tenv = new Map
-		sig.typeParameters.forEach(function(tp) {
-			var node = new UNode
-			tenv.put(tp.name, {type:'any'})//{type: 'node', node:node, name:tp.name})
-			if (tp.constraint) {
-				visitContravariantType(substType(tp.constraint, tenv), node, null, fnode, null)
-			}
-		})
-		return {
-			new: sig.new,
-			variadic: sig.variadic,
-			typeParameters: [],
-			parameters: sig.parameters.map(function(x) { return substParameter(x, tenv) }),
-			returnType: substType(sig.returnType, tenv),
-			meta: sig.meta
-		}
-	}
-	function visitContravariantType(t, self, receiver, fnode, path) {
-		pushCheck({type: t, node: self, path: path})
-		switch (t.type) {
-			case 'reference':
-				var h = '-' + canonicalizeType(t)
-				if (h in type2node) {
-					unifyNow(type2node[h], self)
-					break
-				}
-				type2node[h] = self
-				pushNoCheck()
-				visitContravariantType(resolveTypeRef(t), self, null, fnode, path)
-				popCheck()
-				break
-			case 'object':
-				for (var k in t.properties) {
-					visitContravariantType(t.properties[k].type, self.getPrty(k), self, fnode, qualify(path,k))
-				}
-				t.calls.forEach(function(sig) {
-					visitContravariantCallSig(sig, self, receiver, fnode, path)
-				})
-				// TODO: indexers, brands
-				break;
-			case 'node':
-				unifyNow(self, t.node)
-				break;
-			default:
-				// do nothing
-		}
-		popCheck()
-	}
-	function visitContravariantCallSig(sig, self, receiver, fnode, path) {
-		var call = new CallNode({new: sig.new, context:'sd'})
-		fnode.calls.push(call)
-		if (receiver)
-			call.this = receiver
-		else
-			call.this.makeAny()
-		call.self = self
-		sig = instantiateContravariantCallSig(sig, fnode, path)
-		sig.parameters.forEach(function(param,i) {
-			visitCovariantType(param.type, call.arguments.getPrty(String(i)), null)
-		})
-		visitContravariantType(sig.returnType, call.return, null, fnode, qualify(path, sig2path(sig)))
-	}
-	function instantiateContravariantCallSig(sig, fnode, path) {
-		if (sig.typeParameters.length === 0)
-			return sig
-		var tenv = new Map
-		sig.typeParameters.forEach(function(tp) {
-			var node = new UNode
-			tenv.put(tp.name, {type:'any'})//{type: 'node', node:node, name:tp.name})
-			if (tp.constraint) {
-				visitCovariantType(substType(tp.constraint, tenv), node, null)
-			}
-		})
-		return {
-			new: sig.new,
-			variadic: sig.variadic,
-			typeParameters: [],
-			parameters: sig.parameters.map(function(x) { return substParameter(x, tenv) }),
-			returnType: substType(sig.returnType, tenv),
-			meta: sig.meta
-		}
-	}
 	function sig2path(sig) {
 		return '(' + sig.parameters.map(function(x) { return formatType(x.type) }).join(',') + ')'
 	}
-
 
 	// NATIVE CALL SIGS
 	snapshot.heap.forEach(function(obj,i) {
@@ -2427,7 +2397,7 @@ function Analyzer() {
 			return
 		if (obj.function && obj.function.type === 'native') {
 			getCallSigsForNative(obj.function.id).forEach(function(sig) {
-				visitCovariantCallSig(sig, getConcreteObject(i), null)
+				getConcreteObject(i).call_sigs.add(sig)
 			})
 		}
 	})
@@ -2435,8 +2405,6 @@ function Analyzer() {
 	//////////////////////////
 	//		  SOLVER		//
 	//////////////////////////
-
-	var graphviz = new Graphviz
 
 	var function2shared = Object.create(null)
 	function getSharedFunctionNode(fun) {
@@ -2450,6 +2418,7 @@ function Analyzer() {
 		endClone()
 		fnode.calls.forEach(resolveCallLater)
 		fnode.inherits.forEach(resolveInheritLater)
+		includeFunctionInGraphviz(fnode)
 		return function2shared[fun.$id] = fnode
 	}
 
@@ -2474,33 +2443,49 @@ function Analyzer() {
 
 			// Resolve inheritance
 			complete()
-			unresolved_inherits.forEach(function(inh) {
-				var proto = inh.proto.rep()
-				var child = inh.child.rep()
-				if (proto === child)
-					return
-				// compare properties that are present on both nodes
-				// iterate over the smallest map to speed things up
-				if (proto.properties.size > child.properties.size) {
-					for (var k in child.properties) {
-						if (k[0] !== '$')
-							continue
-						if (!(k in proto.properties))
-							continue
-						unify(proto.properties[k], child.properties[k])
+			unresolved_inherits.forEach(function(child) {
+				child = child.rep()
+				child.prototypes.forEach(function(proto) {
+					proto = proto.rep()
+					if (proto === child)
+						return
+					// compare properties that are present on both nodes
+					// iterate over the smallest map to speed things up
+					if (proto.properties.size > child.properties.size) {
+						for (var k in child.properties) {
+							if (k[0] !== '$')
+								continue
+							if (!(k in proto.properties))
+								continue
+							var protoPrty = proto.properties[k]
+							var childPrty = child.properties[k]
+							if (childPrty.type === 'node') {
+								if (protoPrty.type === 'node') {
+									unify(protoPrty.node, childPrty.node)
+								}
+								// TODO: inherit types from proto??
+							}
+						}
+					} else {
+						for (var k in proto.properties) {
+							if (k[0] !== '$')
+								continue
+							if (!(k in child.properties))
+								continue
+							var protoPrty = proto.properties[k]
+							var childPrty = child.properties[k]
+							if (childPrty.type === 'node') {
+								if (protoPrty.type === 'node') {
+									unify(protoPrty.node, childPrty.node)
+								}
+								// TODO: inherit types from proto??
+							}
+						}
 					}
-				} else {
-					for (var k in proto.properties) {
-						if (k[0] !== '$')
-							continue
-						if (!(k in child.properties))
-							continue
-						unify(child.properties[k], proto.properties[k])
-					}
-				}
+				})
 				complete()
 			})
-
+			
 			// Resolve calls
 			complete()
 			unresolved_calls.forEach(function(call) {
@@ -2532,11 +2517,14 @@ function Analyzer() {
 							break; // do nothing
 					}
 				})
-				callee.call_sigs.forEach(function(cnode) {
-					unify(call.self, cnode.fnode.self)
-					unify(call.this, cnode.fnode.this)
-					unify(call.arguments, cnode.fnode.arguments)
-					unify(call.return, cnode.fnode.return)
+				callee.call_sigs.forEach(function(sig) {
+					if (sig.typeParameters.length > 0)
+						return; // TODO: polymorphic calls
+					call.return.addType(sig.returnType)
+					// unify(call.self, cnode.fnode.self)
+					// unify(call.this, cnode.fnode.this)
+					// unify(call.arguments, cnode.fnode.arguments)
+					// unify(call.return, cnode.fnode.return)
 				})
 				complete()
 			})
@@ -2552,6 +2540,8 @@ function Analyzer() {
 	function qualify(path,k) {
 		if (path === null)
 			return null
+		else if (k[0] === '[' || k[0] === '(')
+			return path + k
 		else
 			return path + '.' + k
 	}
@@ -2567,6 +2557,54 @@ function Analyzer() {
 		if (type.type === 'reference')
 			type = typeDecl.env[type.name].object
 		return type.type === 'object' && type.calls.some(isMethod)
+	}
+	function isPrtyCompatibleWithType(prty, type, path) {
+		if (prty.type === 'node') {
+			return isNodeCompatibleWithType(prty.node, type, path)
+		} else {
+			var ok = prty.types.some(function(t) {
+				return isTypeCompatibleWithType(t, type, null)
+			})
+			if (!ok) {
+				reportError(path, 'expected ' + formatType(type) + ' but found ' + formatUnion(prty.types))
+			}
+			return ok
+		}
+	}
+	var node_prty_compatible = Object.create(null)
+	function isNodeCompatibleWithProperty(node, k, prty, path) {
+		node = node.rep()
+		var dst = node.properties.get(k)
+		if (dst) {
+			return isPrtyCompatibleWithType(dst, prty.type, path)
+		} else {
+			var protoWithPrty = node.prototypes.filter(function(proto) {
+				return proto.properties.has(k)
+			})
+			protoWithPrty = protoWithPrty.unique(function(proto) { return proto.rep().id })
+			if (protoWithPrty.length === 0) {
+				if (!prty.optional) {
+					reportError(path, 'expected ' + formatType(prty.type) + ' but found nothing')
+					return false
+				}
+				return true
+			} else if (protoWithPrty.length === 1) {
+				return isPrtyCompatibleWithType(protoWithPrty[0].properties.get(k), prty.type, path)
+			} else {
+				var h = node.id + '~' + k + '~' + canonicalizeType(type)
+				if (h in node_prty_compatible)
+					return node_prty_compatible[h]
+				node_prty_compatible[h] = false	
+				var ok = node.prototypes.some(function(proto) {
+					return isNodeCompatibleWithProperty(proto, k, type, null) // TODO: avoid duplicate error messages
+				})
+				if (!ok) {
+					reportError(path, 'expected ' + prty.type + ' but found [complex type]')
+				}
+				node_prty_compatible[h] = ok
+				return ok
+			}
+		}
 	}
 	function isNodeCompatibleWithType(node, type, path) {
 		node = node.rep()
@@ -2598,23 +2636,15 @@ function Analyzer() {
 					return false
 				}
 				for (var k in type.properties) {
-					var dst = node.properties.get(k)
-					if (dst) {
-						if (!isNodeCompatibleWithType(dst, type.properties[k].type, qualify(path,k))) {
-							return false
-						}
-					} else {
-						if (!type.properties[k].optional) {
-							reportError(qualify(path,k), 'expected ' + formatType(type.properties[k].type) + ' but found nothing')
-							return false
-						}
+					if (!isNodeCompatibleWithProperty(node, k, type.properties[k], qualify(path,k))) {
+						return false
 					}
 				}
 				if (type.numberIndexer) {
 					var ok = node.properties.all(function(name,dst) {
 						if (!isNumberString(name))
 							return true
-						return isNodeCompatibleWithType(dst, type.numberIndexer, path && (path + '[' + name + ']'))
+						return isPrtyCompatibleWithType(dst, type.numberIndexer, path && (path + '[' + name + ']'))
 					})
 					if (!ok)
 						return false
@@ -2622,7 +2652,7 @@ function Analyzer() {
 				if (type.stringIndexer) {
 					var ok = node.properties.all(function(name,dst) {
 						// FIXME: enumerability check?
-						return isNodeCompatibleWithType(dst, type.stringIndexer, path && (path + "['" + name + "']"))
+						return isPrtyCompatibleWithType(dst, type.stringIndexer, path && (path + "['" + name + "']"))
 					})
 					if (!ok)
 						return false
@@ -2694,6 +2724,148 @@ function Analyzer() {
 				throw new Error("Unexpected value: " + util.inspect(v))
 		}
 	}
+	var type2type_compatible = Object.create(null)
+	function isTypeCompatibleWithType(t1, t2, path) {
+		if (t1.type === 'reference' || t2.type === 'reference') {
+			var h = canonicalizeType(t1) + '~' + canonicalizeType(t2)
+			if (h in type2type_compatible)
+				return type2type_compatible[h]
+			type2type_compatible[h] = true
+			return type2type_compatible[h] = isTypeCompatibleWithType(t1, t2, path)
+		}
+		return isTypeCompatibleWithType(t1, t2, path)
+	}
+	function isTypeCompatibleWithTypeX(t1, t2, path) {
+		if (t1.type === 'any' || t2.type === 'any')
+			return true
+		if (t1.type === 'reference' && t2.type === 'reference' && t1.name === t2.name) {
+			// Approximate compatibility check on references by simply checking type arguments
+			// This not technically not a compatibility check between structural types, but
+			// I will expect it will produce more useful error messages, 
+			// e.g. "expected string[] but found number[]" 
+			var ok = t1.typeArguments.all(function(p1, i) {
+				return isTypeCompatibleWithType(p1, t2.typeArguments[i], null)
+			})
+			if (!ok) {
+				reportError(path, 'expected ' + formatType(t2) + ' but found ' + formatType(t1))
+			}
+			return ok
+		}
+		if (t1.type === 'reference' && t2.type === 'reference') {
+			// expand both references, but cut off the path here, so we don't report
+			// a complicated message describing why the two references are incompatible
+			// e.g. "expected Promise but found HttpRequest" instead of unfolding both types in the error message
+			var ok = isTypeCompatibleWithType(resolveTypeRef(t1), resolveTypeRef(t2), null)
+			if (!ok) {
+				reportError(path, 'expected ' + formatType(t2) + ' but found ' + formatType(t1))
+			}
+			return ok
+		}
+		if (t2.type === 'reference')
+			t2 = resolveTypeRef(t2)
+		if (t2.type === 'object' && (t1.type !== 'object' && t1.type !== 'reference')) {
+			// Coerce t1 to an object. If the compatibility check fails, report the error
+			// as simply "expected XX but found number" instead of a complicated message resulting from
+			// a structural compatibility check
+			var t1o = coerceTypeToObject(t1)
+			if (t1o.type === 'object' || t1o.type === 'reference') {
+				var ok = isTypeCompatibleWithType(t1o, t2, null)
+				if (!ok) {
+					reportError(path, 'expected ' + formatType(t2) + ' but found ' + formatType(t1))
+				}
+				return ok
+			}
+		}
+		switch (t2.type) {
+			case 'object':
+				if (t1.type === 'reference')
+					t1 = resolveTypeRef(t1)
+				if (t1.type !== 'object') {
+					reportError(path, 'expected ' + formatType(t2) + ' but found ' + formatType(t1))
+					return false
+				}
+				for (var k in t2.properties) {
+					if (k in t1.properties) {
+						if (!isTypeCompatibleWithType(t1.properties[k].type, t2.properties[k].type, qualify(path,k))) {
+							return false
+						}
+					}
+					else if (t1.numberIndexer && isNumberString(k)) {
+						if (!isTypeCompatibleWithType(t1.numberIndexer, t2.properties[k].type, qualify(path, k))) {
+							return false
+						}
+					}
+					else if (t1.stringIndexer) {
+						if (!isTypeCompatibleWithType(t1.stringIndexer, t2.properties[k].type, qualify(path, k))) {
+							return false
+						}	
+					}
+					else {
+						if (!t2.properties[k].optional) {
+							reportError(qualify(path,k), 'expected ' + formatType(t2) + ' but found nothing')
+							return false
+						}
+					}
+				}
+				if (t2.numberIndexer) {
+					for (var k in t1.properties) {
+						if (isNumberString(k)) {
+							if (!isTypeCompatibleWithType(t1.properties[k].type, t2.numberIndexer, qualify(path, k))) {
+								return false
+							}
+						}
+					}
+					if (t1.numberIndexer) {
+						if (!isTypeCompatibleWithType(t1.numberIndexer, t2.numberIndexer, qualify(path, '[number]'))) {
+							return false
+						}
+					}
+				}
+				if (t2.stringIndexer) {
+					for (var k in t1.properties) {
+						// TODO: enumerability check?
+						if (!isTypeCompatibleWithType(t1.properties[k].type, t2.stringIndexer, qualify(path, k))) {
+							return false
+						}
+					}
+					if (t1.stringIndexer) {
+						if (!isTypeCompatibleWithType(t1.stringIndexer, t2.stringIndexer, qualify(path, '[number]'))) {
+							return false
+						}
+					}
+				}
+				break
+			case 'number':
+			case 'string':
+			case 'boolean':
+				var ok = t1.type === t2.type || (t1.type === 'value' && typeof t1.value === t2.type)
+				if (!ok) {
+					reportError(path, 'expected ' + formatType(t2) + ' but found ' + formatType(t1))
+				}
+				return ok
+			case 'string-const':
+				var ok = t1.type === 'string' || (t1.type === 'value' && t1.value === t2.value)
+				if (!ok) {
+					reportError(path, 'expected ' + formatType(t2) + ' but found ' + formatType(t1))
+				}
+				return ok
+			case 'value':
+				var ok = (t1.type === typeof t2.value) || (t1.type === 'value' && t1.value === t2.value)
+				if (!ok) {
+					reportError(path, 'expected ' + formatType(t2) + ' but found ' + formatType(t1))
+				}
+				return ok
+			case 'enum':
+				return true // TODO: check enum type properly
+			case 'void':
+				return true
+			case 'node':
+				reportError(path, 'expected generic type ' + t2.name + ' but found ' + formatType(t1))
+				return false
+			default:
+				throw new Error("Unexpected type: " + t2.type)
+		}
+	}
 	
 	function formatNodeAsPrimitive(node) {
 		if (node.isAny)
@@ -2727,42 +2899,70 @@ function Analyzer() {
 			return b.join('|')
 		}
 	}
+	function formatUnion(ut) {
+		if (ut.has({type:'any'}))
+			return 'any'
+		var b = []
+		ut.forEach(function(t) {
+			b.push(formatType(t))
+		})
+		if (b.length === 0) {
+			return 'nothing'
+		} else {
+			return b.join('|')
+		}
+	}
 
 	//////////////////////////////////////
 	//			CHECK SIGNATURE 		//
 	//////////////////////////////////////
 
+	function singleton(t) {
+		var set = new TypeSet
+		set.add(t)
+		return set
+	}
 
 	this.checkSignature = function(sig, function_key, receiver_key, path) {
+		var call = new CallNode({new:sig.new, context: '0'})
 
-		
-
-		var fnode = new FunctionNode
-
-		visitContravariantCallSig(sig, getConcreteObject(function_key), getConcreteObject(receiver_key), fnode, path)
-
-		fnode.calls.forEach(resolveCallLater)
-		fnode.inherits.forEach(resolveInheritLater)
-
-		solve()
-
-		function checkNode(cnode) {
-			if (cnode.check !== null) {
-				if (!isNodeCompatibleWithType(cnode.check.node, cnode.check.type, cnode.check.path)) {
-					return false
-				}
-			}
-			var ok = false
-			cnode.children.forEach(function(x) {
-				ok &= checkNode(x)
-			})
-			return ok
+		// TODO: instantiate call signature
+		if (sig.typeParameters.length > 0) {
+			console.log(path + ': polymorphic')
+			return
 		}
 
-		if (check_stack.length !== 1)
-			throw new Error("Mismatching check stack height")
+		call.self = getConcreteObject(function_key)
+		if (sig.new) {
+			call.this = getConcreteObject(function_key).getPrty('prototype') // TODO: property inheritance of this
+		} else {
+			call.this = getConcreteObject(receiver_key)
+		}
+		sig.parameters.forEach(function(param,i) {
+			call.arguments.properties.put(i, {
+				type: 'union',
+				types: singleton(param.type)
+			})
+		})
 
-		return checkNode(check_stack.last())
+		resolveCallLater(call)
+		solve()
+
+		var resultNode = sig.new ? call.this : call.return
+
+		// graphviz.visitCall(call)
+		// graphviz.visitNode(getConcreteObject(lookupPath("Foo").key))
+		// graphviz_functions.forEach(function(fnode) {
+		// 	graphviz.visitFNode(fnode)
+		// })
+		// graphviz_nodes.forEach(function(fnode) {
+		// 	graphviz.visitNode(fnode)
+		// })
+		// var filename = (graphvizCounter++) + '.dot'
+		// console.log("writing to " + filename)
+		// fs.writeFileSync(filename, graphviz.finish())
+
+		return isNodeCompatibleWithType(resultNode, sig.returnType, path + sig2path(sig))
 	}
 	
 	//////////////////////////////////////
@@ -2784,10 +2984,20 @@ function Analyzer() {
 			if (node.isAny) {
 				str.push("any")
 			}
+			if (node.global) {
+				str.push("global")
+			}
 			node.primitives.forEach(function(t) {
 				str.push(formatType(t))
 			})
 			return str.join(',')
+		}
+		var tnode_id = 1;
+		function makeTypeNodeId() {
+			return 'T' + (tnode_id++)
+		}
+		function visitTypeNode(tnode, id) {
+			print(id + ' [shape=diamond]')
 		}
 		function visitNode(node) {
 			node = node.rep()
@@ -2797,17 +3007,24 @@ function Analyzer() {
 				return
 			seen_nodes[node.id] = true
 			print(node.id + ' [shape=box,label="' + escapeLabel(makeNodeLabel(node)) + '"]')
-			if (!node.global) {
+			if (!node.global || isLive(node)) {
+				markAsLive(node)
 				node.properties.forEach(function(name,dst) {
 					if (name in {})
 						return // ignore trivial properties
-					print(node.id + ' -> ' + dst.rep().id + ' [label="' + escapeLabel(name) + '"]')
-					visitNode(dst)
+					if (dst.type === 'node') {
+						print(node.id + ' -> ' + dst.node.rep().id + ' [label="' + escapeLabel(name) + '"]')
+						visitNode(dst.node)
+					} else {
+						var id = makeTypeNodeId()
+						print(node.id + ' -> ' + id + ' [label="' + escapeLabel(name) + '"]')
+						visitTypeNode(dst, id)
+					}
 				})
-				if (node.proto) {
-					print(node.id + ' -> ' + node.proto.rep().id + ' [label="[proto]"]')
-					visitNode(node.proto)
-				}
+				node.prototypes.forEach(function(proto) {
+					print(node.id + ' -> ' + proto.rep().id + ' [label="[proto]"]')
+					visitNode(proto)
+				})
 			}
 		}
 
@@ -2831,13 +3048,43 @@ function Analyzer() {
 			print(call.self.rep().id + " -> " + id + ':self')
 			print(call.this.rep().id + " -> " + id + ':this')
 			print(call.arguments.rep().id + " -> " + id + ':arguments')
-			print(call.return.rep().id + " -> " + id + ':self')
+			print(call.return.rep().id + " -> " + id + ':return')
+		}
+
+		var node2live = Object.create(null)
+		function isLive(node) {
+			return node2live[node.rep().id]
+		}
+		function markAsLive(node) {
+			node2live[node.rep().id] = true
+		}
+		function checkLive(node) {
+			node = node.rep()
+			if (node.id in node2live)
+				return node2live[node.id]
+			node2live[node.id] = false
+			var isLive = false
+			node.properties.forEach(function(name,dst) {
+				if (dst.type === 'node' && checkLive(dst.node)) {
+					isLive = true
+				}
+			})
+			return node2live[node.id] = isLive
+		}
+		
+		function findAdditionalNodes() {
+			all_unodes.forEach(function(node) {
+				if (checkLive(node)) {
+					visitNode(node)
+				}
+			})
 		}
 
 		this.visitNode = visitNode
 		this.visitFNode = visitFNode
 		this.visitCall = visitCall
 		this.finish = function() {
+			findAdditionalNodes()
 			print("}\n")
 			return sb.join('\n')
 		}
