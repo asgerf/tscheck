@@ -2518,8 +2518,34 @@ function Analyzer() {
 					}
 				})
 				callee.call_sigs.forEach(function(sig) {
-					if (sig.typeParameters.length > 0)
-						return; // TODO: polymorphic calls
+					if (call.resolved_sigs.has(sig))
+						return
+
+					// IDEA
+					// Traverse parameter types in step with argument points-to graph.
+					// When checking callback type (i.e. callsig in covariant position) against
+					// a function, invoke it (deferred, only apply if entire check succeeds) using
+					// the call signature. If a callback type is checked against a call signature,
+					// mark the call signature as having been USED. If a function is every unified
+					// with a call signature that is marked as being USED, we must treat the function
+					// as being invoked using that call signature.
+					call.resolved_sigs.add(sig)
+					sig = instantiateCallSig(sig)
+					var COVARIANT = +1
+					var CONTRAVARIANT = -1
+					function applyCallbacks(t, variance) {
+						switch (t.type) {
+							case 'object':
+								for (var k in t.properties) {
+									applyCallbacks(t.properties[k].type, variance)
+								}
+								if (variance === COVARIANT) {
+									t.calls.forEach(function(sig) {
+
+									})
+								}
+						}
+					}
 					call.return.addType(sig.returnType)
 					// unify(call.self, cnode.fnode.self)
 					// unify(call.this, cnode.fnode.this)
@@ -2528,6 +2554,27 @@ function Analyzer() {
 				})
 				complete()
 			})
+		}
+	}
+
+	function instantiateCallSig(sig) {
+		if (sig.typeParameters.length === 0)
+			return sig
+		var tenv = new Map
+		sig.typeParameters.forEach(function(tp) {
+			var node = new UNode
+			tenv.put(tp.name, {type: 'node', node: node})
+			if (tp.constraint) {
+				node.addType(substType(tp.constraint, tenv))
+			}
+		})
+		return {
+			new: sig.new,
+			variadic: sig.variadic,
+			typeParameters: [],
+			parameters: sig.parameters.map(function(x) { return substParameter(x, tenv) }),
+			returnType: substType(sig.returnType, tenv),
+			meta: sig.meta
 		}
 	}
 
