@@ -9,6 +9,6 @@ do
 	then
 		name=$(basename $prefix)
 		echo $name
-		./tscheck.js $decl >output/$name.txt --verbose $*
+		node --expose-gc tscheck.js $decl >output/$name.txt --verbose $*
 	fi
 done
