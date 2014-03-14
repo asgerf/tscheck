@@ -1180,7 +1180,12 @@ function formatType(type) {
 		case 'value':
 			return 'value ' + formatValue(type.value)
 		case 'node':
-			return '#' + type.name
+			if (type.node.isObject)
+				return type.name
+			else if (!type.node.primitives.isEmpty())
+				return formatUnion(type.node.primitives)
+			else
+				return type.name
 	}
 	return util.inspect(type)
 }
@@ -1206,7 +1211,19 @@ function formatValue(value, depth) {
 		return util.inspect(value)
 	}
 }
-
+function formatUnion(ut) {
+	if (ut.has({type:'any'}))
+		return 'any'
+	var b = []
+	ut.forEach(function(t) {
+		b.push(formatType(t))
+	})
+	if (b.length === 0) {
+		return 'nothing'
+	} else {
+		return b.join('|')
+	}
+}
 
 // ----------------------
 // 		HASH SETS
@@ -1657,6 +1674,22 @@ function Analyzer() {
 				t.calls.forEach(function(call) {
 					self.call_sigs.add(call)
 				})
+				if (t.numberIndexer) {
+					var dst = this.properties.get(0)
+					if (dst) {
+						if (dst.type === 'node') {
+							dst.node.addType(t.numberIndexer)
+						} else if (dst.type === 'union') {
+							dst.types.add(t.numberIndexer)
+						}
+					} else {
+						var ut = {
+							type: 'union',
+							types: singleton(t.numberIndexer)
+						}
+						this.properties.put(0, ut)
+					}
+				}
 				// TODO: indexers, brands
 				break;
 			case 'number':
@@ -1828,6 +1861,7 @@ function Analyzer() {
 		this.resolved_sigs = new CallSigSet
 		this.new = flags.new || false
 		this.context = flags.context
+		this.typeVars = []
 		if (!this.context)
 			throw new Error("CallNode missing context")
 		this.secondary = null
@@ -1841,7 +1875,16 @@ function Analyzer() {
 		call.new = this.new
 		call.context = this.context
 		call.resolved_sigs = this.resolved_sigs.clone()
+		call.typeVars = []
 		return call
+	}
+
+	function EntryCallNode(self, receiver, sig) {
+		if (sig.typeParameters.length > 0)
+			throw new Error("Cannot construct entry call node with polymorphic call signature")
+		this.self = self
+		this.receiver = receiver
+		this.sig = sig
 	}
 
 	function DynamicAccessNode(object, property, value) {
@@ -1866,6 +1909,10 @@ function Analyzer() {
 	var unresolved_dynamic_accesses = []
 	function resolveDynamicAccessLater(dnode) {
 		unresolved_dynamic_accesses.push(dnode)
+	}
+	var unresolved_entry_calls = []
+	function resolveEntryCallLater(enode) {
+		unresolved_entry_calls.push(enode)
 	}
 
 	//////////////////////////////////////
@@ -2410,7 +2457,9 @@ function Analyzer() {
 	// NATIVE CALL SIGS
 	var special_natives = {
 		'Function.prototype.apply': 1,
-		'Function.prototype.call': 1
+		'Function.prototype.call': 1,
+		'Array.prototype.push': 1,
+		'Array.prototype.pop': 1,
 	}
 	snapshot.heap.forEach(function(obj,i) {
 		if (!obj)
@@ -2470,7 +2519,8 @@ function Analyzer() {
 				dnode.property.primitives.forEach(function(t) {
 					switch (t.type) {
 						case 'number':
-							break; // TODO
+							unify(dnode.object.getPrty(0), dnode.value) // TODO
+							break; 
 						case 'string':
 							// dnode.object.makeAny()
 							// dnode.value.makeAny() // TODO: lvalue vs rvalue??
@@ -2527,6 +2577,136 @@ function Analyzer() {
 				})
 				complete()
 			})
+
+			// Resolve entry calls
+			complete()
+			unresolved_entry_calls.forEach(function(ecall) {
+				ecall.self.functions.forEach(function(fun) {
+					if (fun.type !== 'user')
+						return
+					var fnode = getSharedFunctionNode(getFunction(fun.id))
+					ecall.sig.parameters.forEach(function(param,i) {
+						fnode.arguments.getPrty(i).addType(param.type)
+					})
+					if (ecall.sig.new) {
+						// TODO: establish inheritance?
+					} else {
+						if (ecall.receiver) {
+							unify(ecall.receiver, fnode.this)
+						} else {
+							fnode.this.makeAny()
+						}
+					}
+
+					var demand_cache = Object.create(null)
+					var resultNode = ecall.sig.new ? fnode.this : fnode.return
+					demandNodeVsType(resultNode, ecall.sig.returnType) // bind type variables in the result
+					
+					function demandNodeVsType(node, type) {
+						switch (type.type) {
+							case 'node':
+								unify(node, type.node)
+								break;
+							case 'reference':
+								var h = node.id + '~' + canonicalizeType(type)
+								if (h in demand_cache)
+									return
+								demand_cache[h] = true
+								demandNodeVsType(node, resolveTypeRef(type))
+								break;
+							case 'object':
+								for (var k in type.properties) {
+									var dst = node.properties.get(k)
+									if (dst) {
+										demandPrtyVsType(dst, type.properties[k].type)
+									}
+								}
+								if (type.numberIndexer) {
+									node.properties.forEach(function(name,dst) {
+										if (isNumberString(name)) {
+											demandPrtyVsType(dst, type.numberIndexer)
+										}
+									})
+								}
+								if (type.stringIndexer) {
+									node.properties.forEach(function(name,dst) {
+										// TODO: enumerability check?
+										demandPrtyVsType(dst, type.stringIndexer)
+									})
+								}
+								// TODO: use type.calls to add more EntryCallNodes???
+								break;
+						}
+					}
+					function demandPrtyVsType(prty, type) {
+						if (prty.type === 'node') {
+							demandNodeVsType(prty.node, type)
+						} else {
+							prty.types.forEach(function(t) {
+								demandTypeVsType(t, type)
+							})
+						}
+					}
+					function demandTypeVsType(t, type) {
+						switch (type.type) {
+							case 'node':
+								type.node.addType(t)
+								break;
+							case 'reference':
+								if (t.type === 'reference') {
+									if (t.name === type.name) {
+										t.typeArguments.forEach(function(targ,i) {
+											demandTypeVsType(targ, type.typeArguments[i])
+										})
+										return
+									}
+								}
+								if (type.typeArguments.length === 0)
+									return; // it is not possible to run find a node in this case, so just stop here
+								var h = canonicalizeType(t) + '~~' + canonicalizeType(type)
+								if (h in demand_cache)
+									return
+								demand_cache[h] = true
+								demandTypeVsType(t, resolveTypeRef(type))
+								break;
+							case 'object':
+								if (t.type === 'reference')
+									t = resolveTypeRef(t)
+								if (t.type !== 'object')
+									return
+								for (var k in type.properties) {
+									if (k in t.properties) {
+										demandTypeVsType(t.properties[k].type, type.properties[k].type)
+									}
+								}
+								if (type.numberIndexer) {
+									for (var k in t.properties) {
+										if (isNumberString(k)) {
+											demandTypeVsType(t.properties[k].type, type.numberIndexer)
+										}
+									}
+									if (t.numberIndexer) {
+										demandTypeVsType(t.numberIndexer, type.numberIndexer)
+									}
+								}
+								if (type.stringIndexer) {
+									for (var k in t.properties) {
+										demandTypeVsType(t.properties[k], type.stringIndexer)
+									}
+									if (t.stringIndexer) {
+										demandTypeVsType(t.stringIndexer, type.stringIndexer)
+									}
+									else if (t.numberIndexer && !type.numberIndexer) {
+										demandTypeVsType(t.numberIndexer, type.stringIndexer)
+									}
+								}
+								break
+							default:
+								break; // do nothing
+						}
+					}
+				})
+			})
 			
 			// Resolve calls
 			complete()
@@ -2580,7 +2760,13 @@ function Analyzer() {
 									})
 									unify(call.secondary.return, call.return)
 									break
-								case 'Function.prototype.bind':
+								case 'Function.prototype.bind': // TODO bind
+									break
+								case 'Array.prototype.push': // TODO: collapse numeric properties
+									unify(call.this.getPrty(0), call.arguments.getPrty(0))
+									break
+								case 'Array.prototype.pop': // TODO: collapse numeric properties
+									unify(call.this.getPrty(0), call.return)
 									break
 							}
 							break;
@@ -2604,12 +2790,16 @@ function Analyzer() {
 					if (!applicable)
 						return
 
+					changed = true
 					call.resolved_sigs.add(sig)
 
 					var tenv = new Map
-					sig.typeParameters.forEach(function(tp) {
-						var tnode = new UNode
-						tenv.put(tp.name, {type:'node', node: tnode})
+					sig.typeParameters.forEach(function(tp,i) {
+						var tnode = call.typeVars[i]
+						if (!tnode) {
+							tnode = call.typeVars[i] = new UNode
+						}
+						tenv.put(tp.name, {type:'node', node: tnode, name: tp.name})
 						tcheck.getTypeVarBounds().get(tp.name).forEach(function(b) {
 							if (b.type === 'node')
 								unify(b.node, tnode)
@@ -2619,27 +2809,34 @@ function Analyzer() {
 					})
 					call.return.addType(substType(sig.returnType, tenv))
 
-					// TODO: handle callbacks
-
-					// IDEA
-					// Traverse parameter types in step with argument points-to graph.
-					// When checking callback type (i.e. callsig in covariant position) against
-					// a function, invoke it (deferred, only apply if entire check succeeds) using
-					// the call signature. If a callback type is checked against a call signature,
-					// mark the call signature as having been USED. If a function is every unified
-					// with a call signature that is marked as being USED, we must treat the function
-					// as being invoked using that call signature.
-					// call.resolved_sigs.add(sig)
-					// sig = instantiateCallSig(sig)
-
-					// call.return.addType(sig.returnType)
-					// unify(call.self, cnode.fnode.self)
-					// unify(call.this, cnode.fnode.this)
-					// unify(call.arguments, cnode.fnode.arguments)
-					// unify(call.return, cnode.fnode.return)
+					tcheck.getCallSigMatches().forEach(function(cmatch) {
+						// TODO: avoid calling stuff like array.map whenever I pass an array as argument
+						var sig = substCall(cmatch.callsig, tenv)
+						sig = widenPolymorphicCallSig(sig)
+						resolveEntryCallLater(new EntryCallNode(cmatch.node, cmatch.receiver, sig))
+					})
 				})
 				complete()
 			})
+		}
+	}
+	function widenPolymorphicCallSig(sig) {
+		if (sig.typeParameters.length === 0)
+			return sig
+		var tenv = new Map
+		sig.typeParameters.forEach(function(tp) {
+			tenv.put(tp.name, {type:'any'})
+			if (tp.constraint) {
+				tenv.put(tp.name, substType(tp.constraint, tenv))
+			}
+		})
+		return {
+			new: sig.new,
+			variadic: sig.variadic,
+			typeParameters: [],
+			parameters: sig.parameters.map(function(x) { return substParameter(x, tenv) }),
+			returnType: substType(sig.returnType, tenv),
+			meta: sig.meta
 		}
 	}
 
@@ -2673,9 +2870,11 @@ function Analyzer() {
 		})
 		// TODO: use type-param constraints for something
 
-		function isPrtyCompatibleWithType(prty, type, path) {
+		var callSigMatches = []
+
+		function isPrtyCompatibleWithType(prty, type, path, receiver) {
 			if (prty.type === 'node') {
-				return isNodeCompatibleWithType(prty.node, type, path)
+				return isNodeCompatibleWithType(prty.node, type, path, receiver)
 			} else {
 				var ok = prty.types.some(function(t) {
 					return isTypeCompatibleWithType(t, type, null)
@@ -2687,11 +2886,13 @@ function Analyzer() {
 			}
 		}
 		var node_prty_compatible = Object.create(null)
-		function isNodeCompatibleWithProperty(node, k, prty, path) {
+		function isNodeCompatibleWithProperty(node, k, prty, path, receiver) {
+			if (!receiver)
+				receiver = node
 			node = node.rep()
 			var dst = node.properties.get(k)
 			if (dst) {
-				return isPrtyCompatibleWithType(dst, prty.type, path)
+				return isPrtyCompatibleWithType(dst, prty.type, path, receiver)
 			} else {
 				var protoWithPrty = node.prototypes.filter(function(proto) {
 					return proto.properties.has(k)
@@ -2704,14 +2905,14 @@ function Analyzer() {
 					}
 					return true
 				} else if (protoWithPrty.length === 1) {
-					return isPrtyCompatibleWithType(protoWithPrty[0].properties.get(k), prty.type, path)
+					return isPrtyCompatibleWithType(protoWithPrty[0].properties.get(k), prty.type, path, receiver)
 				} else {
 					var h = node.id + '~' + k + '~' + prty.optional + '.' + canonicalizeType(prty.type)
 					if (h in node_prty_compatible)
 						return node_prty_compatible[h]
 					node_prty_compatible[h] = false	
 					var ok = node.prototypes.some(function(proto) {
-						return isNodeCompatibleWithProperty(proto, k, prty, null) // TODO: avoid duplicate error messages
+						return isNodeCompatibleWithProperty(proto, k, prty, null, receiver)
 					})
 					if (!ok) {
 						reportError(path, 'expected ' + prty.type + ' but found [complex type]')
@@ -2722,7 +2923,7 @@ function Analyzer() {
 			}
 		}
 		var node_type_compatible = Object.create(null)
-		function isNodeCompatibleWithType(node, type, path) {
+		function isNodeCompatibleWithType(node, type, path, receiver) {
 			node = node.rep()
 			if (node.isAny)
 				return true
@@ -2730,14 +2931,14 @@ function Analyzer() {
 				reportError(path, 'expected ' + formatType(type) + ' but found ' + formatNodeAsPrimitive(node) + " [non-object]")
 				return
 			}
-			var h = canonicalizeType(type) + "~" + node.id
+			var h = canonicalizeType(type) + "~" + node.id // TODO: include receiver??
 			if (h in node_type_compatible) {
 				return node_type_compatible[h]
 			}
 			node_type_compatible[h] = true
-			return node_type_compatible[h] = isNodeCompatibleWithTypeX(node, type, path)
+			return node_type_compatible[h] = isNodeCompatibleWithTypeX(node, type, path, receiver)
 		}
-		function isNodeCompatibleWithTypeX(node, type, path) {
+		function isNodeCompatibleWithTypeX(node, type, path, receiver) {
 			node = node.rep()
 			if (node.isAny || node.primitives.has({type:'value', value:null}))
 				return true
@@ -2759,7 +2960,7 @@ function Analyzer() {
 						var ok = node.properties.all(function(name,dst) {
 							if (!isNumberString(name))
 								return true
-							return isPrtyCompatibleWithType(dst, type.numberIndexer, path && (path + '[' + name + ']'))
+							return isPrtyCompatibleWithType(dst, type.numberIndexer, qualify(path,'[' + name + ']'), node)
 						})
 						if (!ok)
 							return false
@@ -2767,12 +2968,24 @@ function Analyzer() {
 					if (type.stringIndexer) {
 						var ok = node.properties.all(function(name,dst) {
 							// FIXME: enumerability check?
-							return isPrtyCompatibleWithType(dst, type.stringIndexer, path && (path + "['" + name + "']"))
+							return isPrtyCompatibleWithType(dst, type.stringIndexer, qualify(path, "['" + name + "']"), node)
 						})
 						if (!ok)
 							return false
 					}
-					return ok
+					if (type.calls.length > 0 && node.functions.isEmpty() && node.call_sigs.isEmpty()) {
+						reportError(path, 'expected ' + formatTypeCall(type.calls[0]) + ' but found non-function object')
+						return false
+					}
+					type.calls.forEach(function(sig) {
+						callSigMatches.push({
+							callsig: sig,
+							node: node,
+							receiver: receiver,
+							path: path
+						})
+					})
+					return true
 				case 'node':
 					ok = (node === type.node.rep())
 					if (!ok) {
@@ -2858,6 +3071,8 @@ function Analyzer() {
 		function isTypeCompatibleWithTypeX(t1, t2, path) {
 			if (t1.type === 'any' || t2.type === 'any')
 				return true
+			if (t1.type === 'node')
+				return isNodeCompatibleWithType(t1.node, t2, path)
 			if (t1.type === 'reference' && t2.type === 'reference' && t1.name === t2.name) {
 				// Approximate compatibility check on references by simply checking type arguments
 				// This not technically not a compatibility check between structural types, but
@@ -2997,7 +3212,8 @@ function Analyzer() {
 			isNodeCompatibleWithType: isNodeCompatibleWithType,
 			isPrtyCompatibleWithType: isPrtyCompatibleWithType,
 			isNodeCompatibleWithProperty: isNodeCompatibleWithProperty,
-			getTypeVarBounds: function() { return freeTypeEnv }
+			getTypeVarBounds: function() { return freeTypeEnv },
+			getCallSigMatches: function() { return callSigMatches }
 		}
 	}
 	
@@ -3033,19 +3249,6 @@ function Analyzer() {
 			return b.join('|')
 		}
 	}
-	function formatUnion(ut) {
-		if (ut.has({type:'any'}))
-			return 'any'
-		var b = []
-		ut.forEach(function(t) {
-			b.push(formatType(t))
-		})
-		if (b.length === 0) {
-			return 'nothing'
-		} else {
-			return b.join('|')
-		}
-	}
 
 	//////////////////////////////////////
 	//			CHECK SIGNATURE 		//
@@ -3057,9 +3260,31 @@ function Analyzer() {
 		return set
 	}
 
+	function instantiateSignature(sig) {
+		if (sig.typeParameters.length === 0)
+			return sig
+		var tenv = new Map
+		sig.typeParameters.forEach(function(tp) {
+			var tnode = new UNode
+			tenv.put(tp.name, {type: 'node', node: tnode, name:tp.name})
+			if (tp.constraint) {
+				tnode.addType(substType(tp.constraint, tenv))
+			}
+		})
+		return {
+			new: sig.new,
+			variadic: sig.variadic,
+			typeParameters: [],
+			parameters: sig.parameters.map(function(x) { return substParameter(x, tenv) }),
+			returnType: substType(sig.returnType, tenv),
+			meta: sig.meta
+		}
+	}
+
 	this.checkSignature = function(sig, function_key, receiver_key, path) {
 		var call = new CallNode({new:sig.new, context: '0'})
 
+		// TODO: use instantiateSignature?
 		var tenv = new Map
 		sig.typeParameters.forEach(function(tp) {
 			var tnode = new UNode
