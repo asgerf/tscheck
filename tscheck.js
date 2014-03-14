@@ -492,6 +492,8 @@ function canonicalizeType(type) {
 			return 'W:' + canonicalizeValue(type.value);
 		case 'node':
 			return 'X:' + type.node.rep().id
+		case 'opaque-type':
+			return 'O:' + type.name
 		case 'type-param':
 			return 'T:' + type.name
 		default:
@@ -1180,12 +1182,9 @@ function formatType(type) {
 		case 'value':
 			return 'value ' + formatValue(type.value)
 		case 'node':
-			if (type.node.isObject)
-				return type.name
-			else if (!type.node.primitives.isEmpty())
-				return formatUnion(type.node.primitives)
-			else
-				return type.name
+			return formatNode(type.node)
+		case 'opaque-type':
+			return type.name
 	}
 	return util.inspect(type)
 }
@@ -1216,6 +1215,21 @@ function formatUnion(ut) {
 		return 'any'
 	var b = []
 	ut.forEach(function(t) {
+		b.push(formatType(t))
+	})
+	if (b.length === 0) {
+		return 'nothing'
+	} else {
+		return b.join('|')
+	}
+}
+function formatNode(node) {
+	if (node.isAny)
+		return 'any'
+	var b = []
+	if (node.isObject)
+		b.push('object')
+	node.primitives.forEach(function(t) {
 		b.push(formatType(t))
 	})
 	if (b.length === 0) {
@@ -1642,6 +1656,13 @@ function Analyzer() {
 			case 'node':
 				unifyLater(this, t.node)
 				break;
+			case 'opaque-type':
+				if (this.primitives.add(t)) {
+					if (t.constraint) {
+						this.addType(t.constraint)
+					}	
+				}
+				break;
 			case 'any':
 				this.makeAny();
 				break;
@@ -1671,9 +1692,13 @@ function Analyzer() {
 						this.properties.put(k, ut)
 					}
 				}
-				t.calls.forEach(function(call) {
-					self.call_sigs.add(call)
-				})
+				if (t.calls.length === 1) {
+					self.call_sigs.add(makeUniqueCall(t.calls[0]))
+				} else {
+					t.calls.forEach(function(call) {
+						self.call_sigs.add(call)
+					})
+				}
 				if (t.numberIndexer) {
 					var dst = this.properties.get(0)
 					if (dst) {
@@ -1826,6 +1851,18 @@ function Analyzer() {
 			} else {
 				x.addType(y)
 			}
+		}
+	}
+
+	function makeUniqueCall(call) {
+		return {
+			new: call.new,
+			variadic: call.variadic,
+			typeParameters: call.typeParameters,
+			parameters: call.parameters,
+			returnType: call.returnType,
+			meta: call.meta,
+			unique: true
 		}
 	}
 
@@ -2209,7 +2246,8 @@ function Analyzer() {
 						n = n.rep()
 						unify(elm, n.getPrty(String(i)))
 					})
-					addNativePrototype(n, "Array.prototype")
+					n.addType({type: 'reference', name:'Array', typeArguments:[{type: 'node', node: n.getPrty(0)}]})
+					// addNativePrototype(n, "Array.prototype")
 					return NOT_NULL
 				case 'ObjectExpression':
 					getNode(node).isObject = true
@@ -2457,17 +2495,22 @@ function Analyzer() {
 	// NATIVE CALL SIGS
 	var special_natives = {
 		'Function.prototype.apply': 1,
-		'Function.prototype.call': 1,
-		'Array.prototype.push': 1,
-		'Array.prototype.pop': 1,
+		'Function.prototype.call': 1
+		// 'Array.prototype.push': 1,
+		// 'Array.prototype.pop': 1,
 	}
 	snapshot.heap.forEach(function(obj,i) {
 		if (!obj)
 			return
 		if (obj.function && obj.function.type === 'native' & !special_natives.hasOwnProperty(obj.function.id)) {
-			getCallSigsForNative(obj.function.id).forEach(function(sig) {
-				getConcreteObject(i).call_sigs.add(sig)
-			})
+			var sigs = getCallSigsForNative(obj.function.id)
+			if (sigs.length === 1) {
+				getConcreteObject(i).call_sigs.add(makeUniqueCall(sigs[0]))
+			} else {
+				sigs.forEach(function(sig) {
+					getConcreteObject(i).call_sigs.add(sig)
+				})
+			}
 		}
 	})
 
@@ -2607,6 +2650,8 @@ function Analyzer() {
 							case 'node':
 								unify(node, type.node)
 								break;
+							case 'opaque-type':
+								break;
 							case 'reference':
 								var h = node.id + '~' + canonicalizeType(type)
 								if (h in demand_cache)
@@ -2651,6 +2696,8 @@ function Analyzer() {
 						switch (type.type) {
 							case 'node':
 								type.node.addType(t)
+								break;
+							case 'opaque-type':
 								break;
 							case 'reference':
 								if (t.type === 'reference') {
@@ -2762,12 +2809,6 @@ function Analyzer() {
 									break
 								case 'Function.prototype.bind': // TODO bind
 									break
-								case 'Array.prototype.push': // TODO: collapse numeric properties
-									unify(call.this.getPrty(0), call.arguments.getPrty(0))
-									break
-								case 'Array.prototype.pop': // TODO: collapse numeric properties
-									unify(call.this.getPrty(0), call.return)
-									break
 							}
 							break;
 						case 'bind':
@@ -2779,15 +2820,24 @@ function Analyzer() {
 				callee.call_sigs.forEach(function(sig) {
 					if (call.resolved_sigs.has(sig))
 						return
-					// TODO: varargs
 
 					var tcheck = makeTypeChecker(sig.typeParameters)
-					var applicable = sig.parameters.all(function(param, i) {
-						if (!call.arguments.properties.has(i))
-							return param.optional
-						return tcheck.isNodeCompatibleWithType(call.arguments.getPrty(i), param.type)
+					var applicable = true
+					sig.parameters.forEach(function(param, i) {
+						if (!call.arguments.properties.has(i)) {
+							applicable &= param.optional
+							return
+						}
+						applicable &= tcheck.isPrtyCompatibleWithType(call.arguments.properties.get(i), param.type)
 					})
-					if (!applicable)
+					if (sig.variadic) {
+						call.arguments.properties.forEach(function(prty,i) {
+							if (!isNumberString(i) || i < sig.parameters.length)
+								return
+							applicable &= tcheck.isPrtyCompatibleWithType(prty, sig.parameters.last().type)
+						})
+					}
+					if (!applicable && !sig.unique)
 						return
 
 					changed = true
@@ -2800,19 +2850,26 @@ function Analyzer() {
 							tnode = call.typeVars[i] = new UNode
 						}
 						tenv.put(tp.name, {type:'node', node: tnode, name: tp.name})
-						tcheck.getTypeVarBounds().get(tp.name).forEach(function(b) {
+						tcheck.getBoundTypeParams().get(tp.name).forEach(function(b) {
 							if (b.type === 'node')
 								unify(b.node, tnode)
 							else
 								tnode.addType(b.bound)
 						})
 					})
+					tcheck.getBoundNodes().forEach(function(binding) {
+						if (binding.type === 'node')
+							unify(binding.node, binding.bound)
+						else
+							binding.node.addType(binding.bound)
+					})
 					call.return.addType(substType(sig.returnType, tenv))
 
 					tcheck.getCallSigMatches().forEach(function(cmatch) {
 						// TODO: avoid calling stuff like array.map whenever I pass an array as argument
 						var sig = substCall(cmatch.callsig, tenv)
-						sig = widenPolymorphicCallSig(sig)
+						// sig = widenPolymorphicCallSig(sig)
+						sig = instantiateOpaqueSignature(sig)
 						resolveEntryCallLater(new EntryCallNode(cmatch.node, cmatch.receiver, sig))
 					})
 				})
@@ -2864,11 +2921,11 @@ function Analyzer() {
 		if (!freeTypeVars)
 			freeTypeVars = []
 
-		var freeTypeEnv = new Map
+		var bound_type_params = new Map
+		var bound_nodes = []
 		freeTypeVars.forEach(function(tp) {
-			freeTypeEnv.put(tp.name, [])
+			bound_type_params.put(tp.name, [])
 		})
-		// TODO: use type-param constraints for something
 
 		var callSigMatches = []
 
@@ -2986,12 +3043,6 @@ function Analyzer() {
 						})
 					})
 					return true
-				case 'node':
-					ok = (node === type.node.rep())
-					if (!ok) {
-						reportError(path, "expected generic type " + type.name + " but found " + formatNode(node))
-					}
-					return ok
 				case 'enum':
 					var enum_vals = enum_values.get(type.name)
 					if (enum_vals.length === 0) {
@@ -3026,11 +3077,22 @@ function Analyzer() {
 						return true
 					reportError(path, 'expected ' + formatType(type) + ' but found ' + formatNodeAsPrimitive(node))
 					return false
-				case 'type-param':
-					if (!freeTypeEnv.has(type.name))
-						throw new Error("Unbound type variable: " + type.name)
-					freeTypeEnv.push(type.name, {type: 'node', node: node})
+				case 'node':
+					bound_nodes.push({type: 'node', node: type.node, bound: node})
 					return true
+				case 'type-param':
+					if (!bound_type_params.has(type.name))
+						throw new Error("Unbound type parameter " + type.name)
+					// TODO: check constraint
+					bound_type_params.push(type.name, {type: 'node', node: node})
+					return true
+				case 'opaque-type':
+					if (node.primitives.has(type)) {
+						return true
+					} else {
+						reportError(path, "expected generic type " + type.name + " but found " + formatNode(node))
+						return false
+					}
 				default:
 					throw new Error("Unexpected type: " + util.inspect(type))
 			}
@@ -3113,10 +3175,13 @@ function Analyzer() {
 			}
 			switch (t2.type) {
 				case 'object':
+					var original_t1 = t1
+					if (t1.type === 'opaque-type' && t1.constraint)
+						t1 = t1.constraint
 					if (t1.type === 'reference')
 						t1 = resolveTypeRef(t1)
 					if (t1.type !== 'object') {
-						reportError(path, 'expected ' + formatType(t2) + ' but found ' + formatType(t1))
+						reportError(path, 'expected ' + formatType(t2) + ' but found ' + formatType(original_t1))
 						return false
 					}
 					for (var k in t2.properties) {
@@ -3196,13 +3261,21 @@ function Analyzer() {
 				case 'void':
 					return true
 				case 'node':
+					bound_nodes.push({type: 'type', node: t2.node, bound: t1})
+					return true
+				case 'type-param':
+					if (!bound_type_params.has(type.name))
+						throw new Error("Unbound type parameter " + type.name)
+					// TODO: check constraint
+					bound_type_params.push(type.name, {type: 'type', bound: t1})
+					return true
+				case 'opaque-type':
+					if (t1.type === 'opaque-type' && t1.name === t2.name)
+						return true
 					reportError(path, 'expected generic type ' + t2.name + ' but found ' + formatType(t1))
 					return false
 				case 'type-param':
-					if (!freeTypeEnv.has(t2.name))
-						throw new Error("Unbound type variable: " + t2.name)
-					freeTypeEnv.push(t2.name, {type: 'type', bound: t1})
-					return true
+					throw new Error
 				default:
 					throw new Error("Unexpected type: " + t2.type)
 			}
@@ -3212,7 +3285,8 @@ function Analyzer() {
 			isNodeCompatibleWithType: isNodeCompatibleWithType,
 			isPrtyCompatibleWithType: isPrtyCompatibleWithType,
 			isNodeCompatibleWithProperty: isNodeCompatibleWithProperty,
-			getTypeVarBounds: function() { return freeTypeEnv },
+			getBoundTypeParams: function() { return bound_type_params },
+			getBoundNodes: function() { return bound_nodes },
 			getCallSigMatches: function() { return callSigMatches }
 		}
 	}
@@ -3234,21 +3308,6 @@ function Analyzer() {
 			return b.join('|')
 		}
 	}
-	function formatNode(node) {
-		if (node.isAny)
-			return 'any'
-		var b = []
-		if (node.isObject)
-			b.push('object')
-		node.primitives.forEach(function(t) {
-			b.push(formatType(t))
-		})
-		if (b.length === 0) {
-			return 'nothing'
-		} else {
-			return b.join('|')
-		}
-	}
 
 	//////////////////////////////////////
 	//			CHECK SIGNATURE 		//
@@ -3260,15 +3319,16 @@ function Analyzer() {
 		return set
 	}
 
-	function instantiateSignature(sig) {
+	function instantiateOpaqueSignature(sig) {
 		if (sig.typeParameters.length === 0)
 			return sig
 		var tenv = new Map
 		sig.typeParameters.forEach(function(tp) {
 			var tnode = new UNode
-			tenv.put(tp.name, {type: 'node', node: tnode, name:tp.name})
+			tenv.put(tp.name, {type: 'opaque-type', name: tp.name})
 			if (tp.constraint) {
-				tnode.addType(substType(tp.constraint, tenv))
+				var constraint = substType(tp.constraint, tenv)
+				tenv.put(tp.name, {type: 'opaque-type', name: tp.name, constraint: constraint})
 			}
 		})
 		return {
@@ -3284,15 +3344,7 @@ function Analyzer() {
 	this.checkSignature = function(sig, function_key, receiver_key, path) {
 		var call = new CallNode({new:sig.new, context: '0'})
 
-		// TODO: use instantiateSignature?
-		var tenv = new Map
-		sig.typeParameters.forEach(function(tp) {
-			var tnode = new UNode
-			tenv.put(tp.name, {type: 'node', node: tnode, name:tp.name})
-			if (tp.constraint) {
-				tnode.addType(substType(tp.constraint, tenv))
-			}
-		})
+		sig = instantiateOpaqueSignature(sig)
 		// TODO: varargs
 
 		call.self = getConcreteObject(function_key)
@@ -3307,7 +3359,7 @@ function Analyzer() {
 		sig.parameters.forEach(function(param,i) {
 			call.arguments.properties.put(i, {
 				type: 'union',
-				types: singleton(substType(param.type,tenv))
+				types: singleton(param.type)
 			})
 		})
 
@@ -3315,7 +3367,7 @@ function Analyzer() {
 		solve()
 
 		var resultNode = sig.new ? call.this : call.return
-		var resultType = substType(sig.returnType, tenv)
+		var resultType = sig.returnType
 
 		var tcheck = makeTypeChecker()
 

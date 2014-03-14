@@ -1283,11 +1283,25 @@ TMember.prototype.inspect = function() {
 //      Output
 // --------------------------------------------
 
-function outputParameter(param) {
-    return {
-        name: param.name,
-        optional: param.optional,
-        type: outputType(param.type)
+function outputParameter(call) {
+    return function(param,i) {
+        if (call.variadic && i === call.parameters.length-1) {
+            if (!(param.type instanceof TGeneric) || param.type.base.qname !== 'Array') {
+                throw new Error("The last parameter of a variadic function must be declared as an array type")
+            }
+            return {
+                name: param.name,
+                optional: param.optional,
+                type: outputType(param.type.args[0])
+            }
+        } else {
+            return {
+                name: param.name,
+                optional: param.optional,
+                type: outputType(param.type)
+            }
+        }
+        
     }
 }
 
@@ -1298,7 +1312,7 @@ function outputCall(call) {
         new: call.new,
         variadic: call.variadic,
         typeParameters: call.typeParameters.map(outputTypeParameter),
-        parameters: call.parameters.map(outputParameter),
+        parameters: call.parameters.map(outputParameter(call)),
         returnType: outputType(call.returnType),
         meta: call.meta
     }
