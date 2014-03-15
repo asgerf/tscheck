@@ -633,20 +633,10 @@ function markNatives() {
 			})
 		}
 		for (var k in type.properties) {
-			visitPrty(obj.propertyMap.get(k), type.properties[k].type)
-		}
-		if (type.numberIndexer) {
-			obj.propertyMap.forEach(function(name,prty) {
-				if (isNumberString(name))
-					visitPrty(prty, type.numberIndexer)
-			})
-		}
-		if (type.stringIndexer) {
-			obj.propertyMap.forEach(function(name,prty) {
-				if (prty.enumerable) {
-					visitPrty(prty, type.stringIndexer)
-				}
-			})
+			if (type.properties[k].meta.origin === LIB_ORIGIN) {
+				visitPrty(obj.propertyMap.get(k), type.properties[k].type)
+			}
+			
 		}
 	}
 	function visitPrty(prty,type) {
