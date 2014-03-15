@@ -2496,8 +2496,6 @@ function Analyzer() {
 	var special_natives = {
 		'Function.prototype.apply': 1,
 		'Function.prototype.call': 1
-		// 'Array.prototype.push': 1,
-		// 'Array.prototype.pop': 1,
 	}
 	snapshot.heap.forEach(function(obj,i) {
 		if (!obj)
