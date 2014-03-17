@@ -372,6 +372,7 @@ function substType(type, tenv) {
 			calls: type.calls.map(substCall.fill(undefined,tenv)),
 			stringIndexer: type.stringIndexer && substType(type.stringIndexer, tenv),
 			numberIndexer: type.numberIndexer && substType(type.numberIndexer, tenv),
+			brand: type.brand,
 			path: type.path,
 			meta: type.meta
 		}
@@ -623,6 +624,13 @@ function markNatives() {
 		if (type.type !== 'object')
 			return
 		var obj = lookupObject(value.key)
+		if (type.calls.length > 0 && !obj.function) {
+			// introduce natives that jsnap did not think was a function
+			obj.function = {
+				type: 'native',
+				id: type.path,
+			}
+		}
 		if (obj.function && obj.function.type === 'native') {
 			var list = native2callsigs[obj.function.id]
 			if (!list) {
@@ -1172,7 +1180,7 @@ function formatType(type) {
 		case 'value':
 			return 'value ' + formatValue(type.value)
 		case 'node':
-			return formatNode(type.node)
+			return '<#' + type.node.rep().id + ': ' + formatNode(type.node) + '>'
 		case 'opaque-type':
 			return type.name
 	}
@@ -1272,6 +1280,18 @@ HashSet.prototype.forEach = function(fn) {
 		}
 	}
 }
+HashSet.prototype.map = function(fn, ctor) {
+	if (!ctor) {
+		ctor = this.constructor
+	}
+	var result = new ctor()
+	for (var k in this) {
+		if (this.hasOwnProperty(k)) {
+			result.add(fn(this[k]))
+		}
+	}
+	return result
+}
 HashSet.prototype.addAll = function(ts) {
 	var ch = false
 	for (var k in ts) {
@@ -1283,7 +1303,7 @@ HashSet.prototype.addAll = function(ts) {
 	return ch
 }
 HashSet.prototype.clone = function() {
-	var r = Object.create(Object.getPrototypeOf(this))
+	var r = new this.constructor();// Object.create(Object.getPrototypeOf(this))
 	for (var k in this) {
 		if (this.hasOwnProperty(k)) {
 			r[k] = this[k]
@@ -1309,10 +1329,12 @@ HashSet.prototype.first = function() {
 function TypeSet() {}
 TypeSet.prototype = Object.create(HashSet.prototype)
 TypeSet.prototype.hash = canonicalizeType
+TypeSet.prototype.constructor = TypeSet
 
 function ValueSet() {}
 ValueSet.prototype = Object.create(HashSet.prototype)
 ValueSet.prototype.hash = canonicalizeValue
+ValueSet.prototype.constructor = ValueSet
 
 function canonicalizeFunction(fun) {
 	switch (fun.type) {
@@ -1329,10 +1351,12 @@ function canonicalizeFunction(fun) {
 function FunctionSet() {}
 FunctionSet.prototype = Object.create(HashSet.prototype)
 FunctionSet.prototype.hash = canonicalizeFunction
+FunctionSet.prototype.constructor = FunctionSet
 
 function CallSigSet() {}
 CallSigSet.prototype = Object.create(HashSet.prototype)
 CallSigSet.prototype.hash = canonicalizeCall
+CallSigSet.prototype.constructor = CallSigSet
 
 
 // --------------------------
@@ -1588,7 +1612,7 @@ function Analyzer() {
 			var target = r.clone_target = new UNode
 			target._primitives = r.primitives.clone()
 			target._functions = r.functions.clone()
-			target._call_sigs = r.call_sigs.clone()
+			target._call_sigs = r.call_sigs.map(cloneTypeCall)// clone()
 			target._resolved_refs = r._resolved_refs.clone()
 			target._prototypes = r._prototypes.map(function(x) { return x.clone() })
 			target._isObject = r.isObject
@@ -1597,7 +1621,7 @@ function Analyzer() {
 				if (dst.type === 'node')
 					target.properties.put(name, {type: 'node', node: dst.node.clone()})
 				else
-					target.properties.put(name, {type: 'union', types: dst.types.clone()})
+					target.properties.put(name, {type: 'union', types: dst.types.map(cloneType)})
 			})
 			return target
 		}
@@ -1622,6 +1646,63 @@ function Analyzer() {
 				dst.node.makeGlobal()
 		})
 	}
+
+	function cloneType(t) {
+		switch (t.type) {
+			case 'reference':
+				return {
+					type: 'reference',
+					name: t.name,
+					typeArguments: t.typeArguments.map(cloneType)
+				}
+			case 'object':
+				return {
+					type: 'object',
+					properties: jsonMap(t.properties, cloneTypeProperty),
+					stringIndexer: t.stringIndexer && cloneType(t.stringIndexer),
+					numberIndexer: t.numberIndexer && cloneType(t.numberIndexer),
+					calls: t.calls.map(cloneTypeCall),
+					brand: t.brand
+				}
+			case 'node':
+				return {
+					type: 'node',
+					node: t.node.clone()
+				}
+			default:
+				return t
+		}
+	}
+	function cloneTypeProperty(prty) {
+		return {
+			optional: prty.optional,
+			type: cloneType(prty.type)
+		}
+	}
+	function cloneTypeCall(call) {
+		return {
+			new: call.new,
+			variadic: call.variadic,
+			typeParameters: call.typeParameters.map(cloneTypeParameter),
+			parameters: call.parameters.map(cloneParameter),
+			returnType: cloneType(call.returnType),
+			meta: call.meta
+		}
+	}
+	function cloneTypeParameter(tp) {
+		return {
+			name: tp.name,
+			constraint: tp.constraint && cloneType(tp.constraint)
+		}
+	}
+	function cloneParameter(param) {
+		return {
+			name: param.name,
+			optional: param.optional,
+			type: cloneType(param.type)
+		}
+	}
+
 	function primitiveToObjectType(t) {
 		var typ = t.type === 'value' ? (typeof t.value) : t.type
 		switch (typ) {
@@ -1669,7 +1750,15 @@ function Analyzer() {
 						if (dst.type === 'node') {
 							dst.node.addType(t.properties[k].type)
 						} else if (dst.type === 'union') {
-							dst.types.add(t.properties[k].type)
+							if (t.properties[k].type === 'node') {
+								var targetNode = t.properties[k].node
+								this.properties.put(k, {type: 'node', node:targetNode})
+								dst.types.forEach(function(t2) {
+									targetNode.addType(t2)
+								})
+							} else {
+								dst.types.add(t.properties[k].type)
+							}
 						} else {
 							throw new Error("Unexpected property type: " + util.inspect(dst))
 						}
@@ -1682,6 +1771,10 @@ function Analyzer() {
 						this.properties.put(k, ut)
 					}
 				}
+				// FIXME: add Function.prototype as prototype! Requires access to worklist
+				// if (t.calls.length > 0 && self.call_sigs.length === 0) {
+				// 	self.prototypes.push(getConcreteObject(lookupPath("Function.prototype").key))
+				// }
 				if (t.calls.length === 1) {
 					self.call_sigs.add(makeUniqueCall(t.calls[0]))
 				} else {
@@ -1696,7 +1789,11 @@ function Analyzer() {
 							dst.node.addType(t.numberIndexer)
 						} else if (dst.type === 'union') {
 							dst.types.add(t.numberIndexer)
+						} else {
+							throw new Error
 						}
+					} else if (t.numberIndexer.type === 'node') {
+						this.properties.put(0, {type: 'node', node: t.numberIndexer.node})
 					} else {
 						var ut = {
 							type: 'union',
@@ -1877,6 +1974,7 @@ function Analyzer() {
 		fnode.calls = this.calls.map(function(x) { return x.clone() })
 		fnode.inherits = this.inherits.map(function(x) { return x.clone() })
 		fnode.dynamic_accesses = this.dynamic_accesses.map(function(x) { return x.clone() })
+		fnode.env = this.env && this.env.clone()
 		return fnode
 	}
 
@@ -2019,6 +2117,7 @@ function Analyzer() {
 		var fnode = function2fnode[fun.$id]
 		if (!fnode) {
 			fnode = function2fnode[fun.$id] = makeFunction(fun)
+			includeFunctionInGraphviz(fnode)
 		}
 		return fnode
 	}
@@ -2205,13 +2304,16 @@ function Analyzer() {
 					getNode(node).isObject = true // mark as object
 					unify(getNode(node).getPrty(ENV), env) // make the active environment the new function's outer environment
 					getNode(node).functions.add({type: 'user', id: node.$function_id})
+					addNativePrototype(node, "Function.prototype")
 					break;
 				case 'VariableDeclaration':
 					node.declarations.forEach(function(d) {
 						unify(getVar(d.id), d.id)
 						if (d.init) {
 							var p = visitExp(d.init, NOT_VOID)
-							if (p === NOT_NULL) {
+							if (p === NULL) {
+								getNode(d.id).addType({type: 'value', value:null})
+							} else {
 								unify(d.id, d.init)
 							}
 						}
@@ -2271,6 +2373,7 @@ function Analyzer() {
 					}
 					getNode(node).isObject = true
 					getNode(node).functions.add({type: 'user', id: node.$function_id})
+					addNativePrototype(node, "Function.prototype")
 					return NOT_NULL
 				case 'SequenceExpression':
 					for (var i=0; i<node.expressions.length-1; ++i) {
@@ -2349,8 +2452,13 @@ function Analyzer() {
 					if (node.operator === '=') {
 						visitExp(node.left, NOT_VOID)
 						var r = visitExp(node.right, NOT_VOID)
-						if (r !== NULL) {
+						if (r === NULL) {
+							getNode(node.left).addType({type: 'value', value: null})
+						} else {
 							unify(node, node.left, node.right)
+							if (node.left.type === 'MemberExpression' && !node.left.computed && node.left.property.type === 'Identifier' && node.left.property.id === '__proto__') {
+								addNodePrototype(node.left.object, node.right)
+							}
 						}
 						return r
 					} else {
@@ -2479,7 +2587,11 @@ function Analyzer() {
 	//////////////////////////////////
 	
 	function sig2path(sig) {
-		return '(' + sig.parameters.map(function(x) { return formatType(x.type) }).join(',') + ')'
+		var tpStr = '';
+		if (sig.typeParameters.length > 0) {
+			tpStr = '<' + sig.typeParameters.map(function(tp) { return tp.name }).join(',') + '>'
+		}
+		return tpStr + '(' + sig.parameters.map(function(x) { return formatType(x.type) }).join(',') + ')'
 	}
 
 	// NATIVE CALL SIGS
@@ -2808,6 +2920,8 @@ function Analyzer() {
 				callee.call_sigs.forEach(function(sig) {
 					if (call.resolved_sigs.has(sig))
 						return
+					if (sig.new !== call.new)
+						return
 
 					var tcheck = makeTypeChecker(sig.typeParameters)
 					var applicable = true
@@ -2839,24 +2953,27 @@ function Analyzer() {
 						}
 						tenv.put(tp.name, {type:'node', node: tnode, name: tp.name})
 						tcheck.getBoundTypeParams().get(tp.name).forEach(function(b) {
-							if (b.type === 'node')
+							if (b.type === 'node') {
 								unify(b.node, tnode)
+							}
 							else
 								tnode.addType(b.bound)
 						})
 					})
 					tcheck.getBoundNodes().forEach(function(binding) {
-						if (binding.type === 'node')
+						if (binding.type === 'node') {
 							unify(binding.node, binding.bound)
-						else
+						} else {
 							binding.node.addType(binding.bound)
+						}
 					})
-					call.return.addType(substType(sig.returnType, tenv))
+					complete()
+					var ret = sig.new ? call.this : call.return
+					ret.addType(substType(sig.returnType, tenv))
 
 					tcheck.getCallSigMatches().forEach(function(cmatch) {
 						// TODO: avoid calling stuff like array.map whenever I pass an array as argument
 						var sig = substCall(cmatch.callsig, tenv)
-						// sig = widenPolymorphicCallSig(sig)
 						sig = instantiateOpaqueSignature(sig)
 						resolveEntryCallLater(new EntryCallNode(cmatch.node, cmatch.receiver, sig))
 					})
@@ -2972,10 +3089,6 @@ function Analyzer() {
 			node = node.rep()
 			if (node.isAny)
 				return true
-			if (!node.isObject && type.type === 'reference') {
-				reportError(path, 'expected ' + formatType(type) + ' but found ' + formatNodeAsPrimitive(node) + " [non-object]")
-				return
-			}
 			var h = canonicalizeType(type) + "~" + node.id // TODO: include receiver??
 			if (h in node_type_compatible) {
 				return node_type_compatible[h]
@@ -2988,12 +3101,13 @@ function Analyzer() {
 			if (node.isAny || node.primitives.has({type:'value', value:null}))
 				return true
 			var ok = true
+			var originalType = type
 			if (type.type === 'reference')
 				type = resolveTypeRef(type)
 			switch (type.type) {
 				case 'object':
 					if (!node.isObject) {
-						reportError(path, 'expected ' + formatType(type) + ' but found ' + formatNodeAsPrimitive(node) + " [non-object]")
+						reportError(path, 'expected ' + formatType(originalType) + ' but found ' + formatNodeAsPrimitive(node) + " [non-object]")
 						return false
 					}
 					for (var k in type.properties) {
@@ -3286,11 +3400,10 @@ function Analyzer() {
 		node.primitives.forEach(function(t) {
 			b.push(formatType(t))
 		})
+		if (node.isObject)
+			b.push('object')
 		if (b.length === 0) {
-			if (node.isObject)
-				return 'object'
-			else
-				return 'nothing'
+			return 'nothing'
 		}
 		else {
 			return b.join('|')
@@ -3332,6 +3445,7 @@ function Analyzer() {
 	this.checkSignature = function(sig, function_key, receiver_key, path) {
 		var call = new CallNode({new:sig.new, context: '0'})
 
+		var originalSig = sig;
 		sig = instantiateOpaqueSignature(sig)
 		// TODO: varargs
 
@@ -3359,10 +3473,8 @@ function Analyzer() {
 
 		var tcheck = makeTypeChecker()
 
-		return tcheck.isNodeCompatibleWithType(resultNode, resultType, path + sig2path(sig))
-
 		// graphviz.visitCall(call)
-		// graphviz.visitNode(getConcreteObject(lookupPath("Foo").key))
+		// // graphviz.visitNode(getConcreteObject(lookupPath("Foo").key))
 		// graphviz_functions.forEach(function(fnode) {
 		// 	graphviz.visitFNode(fnode)
 		// })
@@ -3370,8 +3482,11 @@ function Analyzer() {
 		// 	graphviz.visitNode(fnode)
 		// })
 		// var filename = (graphvizCounter++) + '.dot'
-		// console.log("writing to " + filename)
+		// console.log("writing to " + filename + " for path " + path + sig2path(originalSig))
 		// fs.writeFileSync(filename, graphviz.finish())
+
+		return tcheck.isNodeCompatibleWithType(resultNode, resultType, path + sig2path(originalSig))
+
 	}
 	
 	//////////////////////////////////////
@@ -3399,6 +3514,7 @@ function Analyzer() {
 			node.primitives.forEach(function(t) {
 				str.push(formatType(t))
 			})
+			str.push(node.id)
 			return str.join(',')
 		}
 		var tnode_id = 1;
