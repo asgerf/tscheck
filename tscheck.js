@@ -880,72 +880,6 @@ function checkCallSignature(call, receiverKey, functionKey, path) {
 	// }
 }
 
-// --------------------
-// 		Subtyping
-// --------------------
-
-var subtype_assumptions = Object.create(null);
-function isSubtypeOf(x, y) { // x <: y
-	switch (y.type) {
-		case 'object':
-			// x <: {..}
-			x = coerceTypeToObject(x)
-			if (x.type === 'reference') {
-				x = lookupQType(x.name, x.typeArguments)
-			}
-			if (x.type !== 'object')
-				return false;
-			for (var k in y.properties) {
-				if (!x.hasOwnProperty(k))
-					return false
-				if (x.properties[k].optional && !y.properties[k].optional) {
-					return false // {f?:T} is not subtype of {f:T}
-				}
-				if (!isSubtypeOf(x.properties[k].type, y.properties[k].type)) {
-					return false
-				}
-			}
-			if (y.stringIndexer) {
-				if (!x.stringIndexer)
-					return false
-				if (!isSubtypeOf(x.stringIndexer, y.stringIndexer))
-					return false
-			}
-			if (y.numberIndexer) {
-				if (!x.numberIndexer)
-					return false
-				if (!isSubtypeOf(x.numberIndexer, y.numberIndexer))
-					return false
-			}
-			// TODO: call signatures?
-			return true
-		case 'reference':
-			var key = canonicalizeType(x) + '~' + canonicalizeType(y)
-			if (key in subtype_assumptions)
-				return subtype_assumptions[key]
-			subtype_assumptions[key] = true
-			return subtype_assumptions[key] = isSubtypeOf(x, lookupQType(y.name, y.typeArguments))
-		case 'enum':
-			return (x.type === 'enum' && x.name === y.name)
-		case 'string-const':
-			return (x.type === 'string-const' && x.value === y.value)
-		case 'number':
-			return (x.type === 'number')
-		case 'string':
-			return (x.type === 'string' || x.type === 'string-const')
-		case 'boolean':
-			return (x.type === 'boolean')
-		case 'any':
-			return true;
-		case 'void':
-			return (x.type === 'void')
-		case 'type-param':
-			throw new Error("Checking subtype vs unbound type parameter: " + util.inspect(y))
-		default:
-			throw new Error("Unrecognized type type: " + y.type + " " + util.inspect(y))
-	}
-}
-
 // --------------------------------------------
 // 		Suggest Additions to the Interface     
 // --------------------------------------------
@@ -2109,6 +2043,26 @@ function Analyzer() {
 	}
 	buildHeap() 
 
+	// NATIVE CALL SIGS
+	var special_natives = {
+		'Function.prototype.apply': 1,
+		'Function.prototype.call': 1
+	}
+	snapshot.heap.forEach(function(obj,i) {
+		if (!obj)
+			return
+		if (obj.function && obj.function.type === 'native' & !special_natives.hasOwnProperty(obj.function.id)) {
+			var sigs = getCallSigsForNative(obj.function.id)
+			if (sigs.length === 1) {
+				getConcreteObject(i).call_sigs.add(makeUniqueCall(sigs[0]))
+			} else {
+				sigs.forEach(function(sig) {
+					getConcreteObject(i).call_sigs.add(sig)
+				})
+			}
+		}
+	})
+
 	//////////////////////////////
 	// 		AST -> U-NODES		//
 	//////////////////////////////
@@ -2582,38 +2536,6 @@ function Analyzer() {
 	}
 
 
-	//////////////////////////////////
-	// 		TYPES -> U-NODES		//
-	//////////////////////////////////
-	
-	function sig2path(sig) {
-		var tpStr = '';
-		if (sig.typeParameters.length > 0) {
-			tpStr = '<' + sig.typeParameters.map(function(tp) { return tp.name }).join(',') + '>'
-		}
-		return tpStr + '(' + sig.parameters.map(function(x) { return formatType(x.type) }).join(',') + ')'
-	}
-
-	// NATIVE CALL SIGS
-	var special_natives = {
-		'Function.prototype.apply': 1,
-		'Function.prototype.call': 1
-	}
-	snapshot.heap.forEach(function(obj,i) {
-		if (!obj)
-			return
-		if (obj.function && obj.function.type === 'native' & !special_natives.hasOwnProperty(obj.function.id)) {
-			var sigs = getCallSigsForNative(obj.function.id)
-			if (sigs.length === 1) {
-				getConcreteObject(i).call_sigs.add(makeUniqueCall(sigs[0]))
-			} else {
-				sigs.forEach(function(sig) {
-					getConcreteObject(i).call_sigs.add(sig)
-				})
-			}
-		}
-	})
-
 	//////////////////////////
 	//		  SOLVER		//
 	//////////////////////////
@@ -3018,6 +2940,14 @@ function Analyzer() {
 			return
 		console.log(path + ': ' + msg)
 	}
+	function sig2path(sig) {
+		var tpStr = '';
+		if (sig.typeParameters.length > 0) {
+			tpStr = '<' + sig.typeParameters.map(function(tp) { return tp.name }).join(',') + '>'
+		}
+		return tpStr + '(' + sig.parameters.map(function(x) { return formatType(x.type) }).join(',') + ')'
+	}
+
 
 	// Creates a new type checker instance.
 	// A type checker instance becomes obsolete when the heap changes, and should not be reused after that point
