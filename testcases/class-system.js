@@ -103,6 +103,9 @@ var Obj = util.createClass({
 var MyClass = util.createClass(Obj, {
   initialize: function() {
     this.x = 5;
+  },
+  toString: function() {
+    return "MyClass"
   }
 })
 

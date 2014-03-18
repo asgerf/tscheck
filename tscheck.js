@@ -46,7 +46,9 @@ function getArgumentWithExtension(ext) {
 		return program.args.find(function(x) { return x.endsWith('.' + ext) })
 	}
 }
+var snapshotWasGenerated = false
 function generateSnapshot(jsfile, jsnapfile, callback) {
+	snapshotWasGenerated = true
 	// console.log("Regenerating jsnap file `" + jsnapfile + "` from `" + jsfile + "`")
 	var spawn = require('child_process').spawn
 	var fd = fs.openSync(jsnapfile, 'w')
@@ -131,7 +133,14 @@ function initialize() {
 		try {
 			snapshot = JSON.parse(snapshotText);
 		} catch (e) {
-			fatalError("Parse error in " + snapshotFile, e)
+			if (snapshotWasGenerated) {
+				console.error('Error while executing library code')
+				console.error(snapshotText)
+				fs.unlinkSync(snapshotFile)
+				process.exit(1)
+			} else {
+				fatalError("Parse error in " + snapshotFile, e)
+			}
 		}
 
 		// Load TypeScript
@@ -1989,10 +1998,15 @@ function Analyzer() {
 			n.isObject = true
 			n.global = true
 			if (obj.function) {
-				if (obj.function.type === 'user' && !obj.function.id) {
-					console.error(util.inspect(obj))
+				if (obj.function.type === 'user') {
+					n.functions.add({
+						type: 'user',
+						id: obj.function.id,
+						context: i
+					})
+				} else {
+					n.functions.add(obj.function)
 				}
-				n.functions.add(obj.function)
 			}
 		})
 		snapshot.heap.forEach(function(obj,i) {
@@ -2257,7 +2271,7 @@ function Analyzer() {
 					unify(node, node.id, env.getPrty(node.id.name)) // make accessible via variable name
 					getNode(node).isObject = true // mark as object
 					unify(getNode(node).getPrty(ENV), env) // make the active environment the new function's outer environment
-					getNode(node).functions.add({type: 'user', id: node.$function_id})
+					getNode(node).functions.add({type: 'user', id: node.$function_id, context: 'AST'})
 					addNativePrototype(node, "Function.prototype")
 					break;
 				case 'VariableDeclaration':
@@ -2326,7 +2340,7 @@ function Analyzer() {
 						unify(getNode(node).getPrty(ENV), env)
 					}
 					getNode(node).isObject = true
-					getNode(node).functions.add({type: 'user', id: node.$function_id})
+					getNode(node).functions.add({type: 'user', id: node.$function_id, context: 'AST'})
 					addNativePrototype(node, "Function.prototype")
 					return NOT_NULL
 				case 'SequenceExpression':
@@ -2541,8 +2555,9 @@ function Analyzer() {
 	//////////////////////////
 
 	var function2shared = Object.create(null)
-	function getSharedFunctionNode(fun) {
-		var fnode = function2shared[fun.$id]
+	function getSharedFunctionNode(fun, context) {
+		var h = fun.$id + '~' + context
+		var fnode = function2shared[h]
 		if (fnode)
 			return fnode
 		fnode = getPristineFunctionNode(fun)
@@ -2554,7 +2569,7 @@ function Analyzer() {
 		fnode.inherits.forEach(resolveInheritLater)
 		fnode.dynamic_accesses.forEach(resolveDynamicAccessLater)
 		includeFunctionInGraphviz(fnode)
-		return function2shared[fun.$id] = fnode
+		return function2shared[h] = fnode
 	}
 
 	var num_iterations = 0
@@ -2649,7 +2664,7 @@ function Analyzer() {
 				ecall.self.functions.forEach(function(fun) {
 					if (fun.type !== 'user')
 						return
-					var fnode = getSharedFunctionNode(getFunction(fun.id))
+					var fnode = getSharedFunctionNode(getFunction(fun.id), fun.context)
 					ecall.sig.parameters.forEach(function(param,i) {
 						fnode.arguments.getPrty(i).addType(param.type)
 					})
@@ -2794,7 +2809,7 @@ function Analyzer() {
 							if (!fun.id) {
 								console.error(util.inspect(fun))
 							}
-							var fnode = getSharedFunctionNode(getFunction(fun.id))
+							var fnode = getSharedFunctionNode(getFunction(fun.id), fun.context)
 							unify(fnode.self, call.self)
 							unify(fnode.this, call.this)
 							unify(fnode.arguments, call.arguments)
@@ -3017,8 +3032,9 @@ function Analyzer() {
 		var node_type_compatible = Object.create(null)
 		function isNodeCompatibleWithType(node, type, path, receiver) {
 			node = node.rep()
-			if (node.isAny)
+			if (node.isAny) {
 				return true
+			}
 			var h = canonicalizeType(type) + "~" + node.id // TODO: include receiver??
 			if (h in node_type_compatible) {
 				return node_type_compatible[h]
