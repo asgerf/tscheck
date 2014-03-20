@@ -15,6 +15,7 @@ program.option('--compact', 'Report at most one violation per type path')
 	   .option('--no-warn', 'Squelch type errors')
 	   .option('--no-jsnap', 'Do not regenerate .jsnap file, even if older than .js file')
 	   .option('--verbose', 'More verbose fatal error messages')
+	   .option('--path <STR>', 'Report only warnings on the given path', String, '')
 program.parse(process.argv);
 
 if (program.args.length === 0) {
@@ -685,6 +686,8 @@ function isNumberLikeString(x) {
 
 var tpath2warning = new Map;
 function reportError(msg, path, tpath) {
+	if (program.path && !path.has(program.path))
+		return
 	var append = ''
 	if (program.compact && tpath2warning.has(tpath)) {
 		// append = ' [REPEAT]'
@@ -868,6 +871,8 @@ function hasBrand(value, brand) {
 
 var shared_analyzer;
 function checkCallSignature(call, receiverKey, functionKey, path) {
+	if (program.path && !path.has(program.path))
+		return
 	var functionObj = lookupObject(functionKey)
 	if (!functionObj.function) {
 		console.log(path + ": expected " + formatTypeCall(call) + " but found non-function object")
@@ -3431,8 +3436,36 @@ function Analyzer() {
 		// console.log("writing to " + filename + " for path " + path + sig2path(originalSig))
 		// fs.writeFileSync(filename, graphviz.finish())
 
-		return tcheck.isNodeCompatibleWithType(resultNode, resultType, path + sig2path(originalSig))
+		var ok = tcheck.isNodeCompatibleWithType(resultNode, resultType, path + sig2path(originalSig))
 
+		if (!ok && !sig.new)
+			return
+
+		var toCheck = []
+		tcheck.getCallSigMatches().forEach(function(cmatch) {
+			var sig = instantiateOpaqueSignature(cmatch.callsig)
+			resolveEntryCallLater(new EntryCallNode(cmatch.node, cmatch.receiver, sig))
+			toCheck.push({
+				node: cmatch.node,
+				type: sig.returnType,
+				path: cmatch.path + sig2path(cmatch.callsig)
+			})
+		})
+		solve()
+
+		tcheck = makeTypeChecker()
+
+		toCheck.forEach(function(chk) {
+			chk.node.rep().functions.forEach(function(fun) {
+				if (fun.type !== 'user')
+					return
+				var fnode = getSharedFunctionNode(getFunction(fun.id), fun.context)
+
+				tcheck.isNodeCompatibleWithType(fnode.return, chk.type, chk.path)
+			})
+		})
+
+		return ok
 	}
 	
 	//////////////////////////////////////
