@@ -463,7 +463,7 @@ function canonicalizeType(type) {
 			if (type.canonical_id)
 				return type.canonical_id;
 			var bag = []
-			for (k in type.properties) {
+			for (var k in type.properties) {
 				var prty = type.properties[k]
 				bag.push(k + (prty.optional ? '?' : '') + ':' + canonicalizeType(prty.type))
 			}
@@ -873,6 +873,8 @@ var shared_analyzer;
 function checkCallSignature(call, receiverKey, functionKey, path) {
 	if (program.path && !path.has(program.path))
 		return
+	if (call.returnType.type === 'any' || call.returnType.type === 'void')
+		return // don't bother checking these call signatures
 	var functionObj = lookupObject(functionKey)
 	if (!functionObj.function) {
 		console.log(path + ": expected " + formatTypeCall(call) + " but found non-function object")
@@ -1105,6 +1107,8 @@ function formatType(type) {
 			members = members.concat(type.calls.map(formatTypeCall));
 			return '{' + members.join(', ') + '}'
 		case 'reference':
+			if (type.name === 'Array' && type.typeArguments.length === 1)
+				return formatType(type.typeArguments[0]) + '[]'
 			if (type.typeArguments.length > 0)
 				return type.name + '<' + type.typeArguments.map(formatType).join(', ') + '>'
 			else
@@ -1243,7 +1247,7 @@ HashSet.prototype.map = function(fn, ctor) {
 HashSet.prototype.addAll = function(ts) {
 	var ch = false
 	for (var k in ts) {
-		if (!(k in this)) {
+		if (ts.hasOwnProperty(k) && !this.hasOwnProperty(k)) {
 			this[k] = ts[k]
 			ch = true
 		}
@@ -1294,6 +1298,8 @@ function canonicalizeFunction(fun) {
 			return 'B' + canonicalizeValue(fun.target) + '^' + fun.arguments.map(canonicalizeValue).join('^')
 		case 'unknown':
 			return 'U'
+		default:
+			throw new Error
 	}
 }
 function FunctionSet() {}
@@ -1305,6 +1311,7 @@ function CallSigSet() {}
 CallSigSet.prototype = Object.create(HashSet.prototype)
 CallSigSet.prototype.hash = canonicalizeCall
 CallSigSet.prototype.constructor = CallSigSet
+
 
 
 // --------------------------
@@ -1475,6 +1482,11 @@ function Analyzer() {
 	function endClone() {
 	}
 
+	var LEVEL_ANY = 3
+	var LEVEL_DICT = 2
+	var LEVEL_ARRAY = 1
+	var LEVEL_BOT = 0
+
 	var all_unodes = []
 	var unode_id = 0
 	function UNode() {
@@ -1495,8 +1507,11 @@ function Analyzer() {
 		this._call_sigs = new CallSigSet
 		this._resolved_refs = new TypeSet
 		this._prototypes = []
-		this._isAny = false
 		this._isObject = false
+		this._level = LEVEL_BOT
+		this._isFree = false
+
+		// this.origin = new Error().stack // FIXME: debugging only
 	}
 	UNode.prototype = {
 		get id() { return this.rep()._id },
@@ -1506,10 +1521,13 @@ function Analyzer() {
 		get call_sigs() { return this.rep()._call_sigs },
 		get resolved_refs() { return this.rep()._resolved_refs },
 		get prototypes() { return this.rep()._prototypes },
-		get isAny() { return this.rep()._isAny },
-		set isAny(x) { this.rep()._isAny = x },
+		get isAny() { return this.rep()._level === LEVEL_ANY },
 		get isObject() { return this.rep()._isObject },
-		set isObject(x) { this.rep()._isObject = x }
+		set isObject(x) { this.rep()._isObject = x },
+		get level() { return this.rep()._level },
+		set level(x) { this.rep()._level = x },
+		get isFree() { return this.rep()._isFree },
+		set isFree(x) { return this.rep()._isFree = x }
 	}
 	UNode.prototype.rep = function() {
 		var p = this.parent
@@ -1517,15 +1535,95 @@ function Analyzer() {
 			return p
 		return this.parent = p.rep()
 	};
+	UNode.prototype.makeLevel = function(level) {
+		var r = this.rep()
+		if (level <= r.level)
+			return
+		r.level = level
+		switch (level) {
+			case LEVEL_ANY:
+				var envPtr;
+				r.properties.forEach(function(name,dst) {
+					if (name === ENV) {
+						envPtr = dst
+						return
+					}
+					if (dst.type === 'node') {
+						dst.node.makeLevel(LEVEL_ANY)
+						unifyLater(dst.node, r)
+					}
+				})
+				r._properties = new SMap
+				if (envPtr) {
+					r._properties.put(ENV, envPtr)
+				}
+				break;
+			case LEVEL_DICT:
+				var envPtr;
+				var elm;
+				r.properties.forEach(function(name,dst) {
+					if (name === ENV) {
+						envPtr = dst;
+						return
+					}
+					if (!elm) {
+						elm = dst
+						return
+					}
+					elm = unifyNodeProperties(elm, dst)
+				})
+				r._properties = new SMap
+				if (elm) {
+					r.properties.put('0', elm)
+				}
+				if (envPtr) {
+					r.properties.put(ENV, envPtr)
+				}
+				break;
+			case LEVEL_ARRAY:
+				var elm;
+				r.properties.forEach(function(name,dst) {
+					if (isNumberString(name)) {
+						r.properties.remove(name)
+						if (!elm) {
+							elm = dst
+							return
+						}
+						elm = unifyNodeProperties(elm, dst)
+					}
+				})
+				if (elm) {
+					r.properties.put('0', elm)
+				}
+				break;
+		}
+	}
 	UNode.prototype.getPrty = function(name) {
 		var r = this.rep()
 		var wasEmpty = r.properties.size === 0
+		switch (r._level) {
+			case LEVEL_BOT:
+				break
+
+			case LEVEL_ARRAY:
+				if (isNumberString(name))
+					name = '0'
+				break
+
+			case LEVEL_DICT:
+				if (name !== ENV)
+					name = '0'
+				break
+
+			case LEVEL_ANY:
+				if (name !== ENV)
+					return r
+		}
 		var p = r.properties.get(name)
 		var n;
 		if (!p) {
 			n = new UNode
 			r.properties.put(name, {type: 'node', node: n})
-			n.isAny = r.isAny
 			n.global = r.global
 		} else if (p.type === 'node') {
 			n = p.node
@@ -1534,7 +1632,6 @@ function Analyzer() {
 			p.types.forEach(function(t) {
 				n.addType(t)
 			})
-			n.isAny = r.isAny
 			n.global = r.global
 			r.properties.put(name, {type: 'node', node: n})
 		}
@@ -1563,8 +1660,9 @@ function Analyzer() {
 			target._call_sigs = r.call_sigs.map(cloneTypeCall)// clone()
 			target._resolved_refs = r._resolved_refs.clone()
 			target._prototypes = r._prototypes.map(function(x) { return x.clone() })
-			target._isObject = r.isObject
-			target._isAny = r.isAny
+			target._isObject = r._isObject
+			target._level = r._level
+			target._isFree = r._isFree
 			r.properties.forEach(function(name,dst) {
 				if (dst.type === 'node')
 					target.properties.put(name, {type: 'node', node: dst.node.clone()})
@@ -1575,14 +1673,15 @@ function Analyzer() {
 		}
 	}
 	UNode.prototype.makeAny = function() {
-		var r = this.rep()
-		if (r.isAny)
-			return
-		r.isAny = true
-		r.properties.forEach(function(name,dst) {
-			if (dst.type === 'node')
-				dst.node.makeAny()
-		})
+		this.makeLevel(LEVEL_ANY)
+		// var r = this.rep()
+		// if (r.isAny)
+		// 	return
+		// r.isAny = true
+		// r.properties.forEach(function(name,dst) {
+		// 	if (dst.type === 'node')
+		// 		dst.node.makeAny()
+		// })
 	}
 	UNode.prototype.makeGlobal = function() {
 		var r = this.rep()
@@ -1593,6 +1692,25 @@ function Analyzer() {
 			if (dst.type === 'node')
 				dst.node.makeGlobal()
 		})
+	}
+	UNode.prototype.translateName = function(name) {
+		if (name === ENV)
+			return ENV
+		switch (this.level) {
+			case LEVEL_ANY:
+				return null
+			case LEVEL_DICT:
+				return '0'
+			case LEVEL_ARRAY:
+				if (isNumberString(name))
+					return '0'
+				else
+					return name
+			case LEVEL_BOT:
+				return name
+			default:
+				throw new Error
+		}
 	}
 
 	function cloneType(t) {
@@ -1671,6 +1789,8 @@ function Analyzer() {
 			this.rep().addType(t)
 			return
 		}
+		if (this.isAny)
+			return
 		switch (t.type) {
 			case 'node':
 				unifyLater(this, t.node)
@@ -1687,20 +1807,24 @@ function Analyzer() {
 				break;
 			case 'reference':
 				if (this.resolved_refs.add(t)) {
+					if (t.name === 'Array') {
+						this.makeLevel(LEVEL_ARRAY)
+					}
 					this.addType(resolveTypeRef(t))
 				}
 				break;
 			case 'object':
 				this.isObject = true
 				for (var k in t.properties) {
-					var dst = this.properties.get(k)
+					var name = this.translateName(k)
+					var dst = this.properties.get(name)
 					if (dst) {
 						if (dst.type === 'node') {
 							dst.node.addType(t.properties[k].type)
 						} else if (dst.type === 'union') {
 							if (t.properties[k].type === 'node') {
 								var targetNode = t.properties[k].node
-								this.properties.put(k, {type: 'node', node:targetNode})
+								this.properties.put(name, {type: 'node', node:targetNode})
 								dst.types.forEach(function(t2) {
 									targetNode.addType(t2)
 								})
@@ -1716,7 +1840,7 @@ function Analyzer() {
 							types: new TypeSet
 						}
 						ut.types.add(t.properties[k].type)
-						this.properties.put(k, ut)
+						this.properties.put(name, ut)
 					}
 				}
 				// FIXME: add Function.prototype as prototype! Requires access to worklist
@@ -1731,6 +1855,7 @@ function Analyzer() {
 					})
 				}
 				if (t.numberIndexer) {
+					this.makeLevel(LEVEL_ARRAY)
 					var dst = this.properties.get(0)
 					if (dst) {
 						if (dst.type === 'node') {
@@ -1776,6 +1901,28 @@ function Analyzer() {
 			}	
 		}
 	}
+	function unifyNodeProperties(p1, p2) {
+		var res = p1
+		if (p1.type === 'node') {
+			if (p2.type === 'node') {
+				unifyLater(p1.node, p2.node)
+			} else {
+				p2.types.forEach(function(t) {
+					addTypeLater(p1.node, t)
+				})
+			}
+		} else {
+			if (p2.type === 'node') {
+				res = p2
+				p1.types.forEach(function(t) {
+					addTypeLater(p2.node, t)
+				})
+			} else {
+				p1.types.addAll(p2.types)
+			}
+		}
+		return res
+	}
 
 	function unifyNow(n1, n2) {
 		n1 = n1.rep()
@@ -1783,12 +1930,14 @@ function Analyzer() {
 		if (n1 === n2)
 			return
 
-		if (n2.isAny && !n1.isAny) {
-			n1.makeAny()
-		}
-		else if (n1.isAny && !n2.isAny) {
-			n2.makeAny()
-		}
+		n1.makeLevel(n2.level)
+		n2.makeLevel(n1.level)
+		// if (n2.isAny && !n1.isAny) {
+		// 	n1.makeAny()
+		// }
+		// else if (n1.isAny && !n2.isAny) {
+		// 	n2.makeAny()
+		// }
 		if (n2.global && !n1.global) {
 			n1.makeGlobal()
 		}
@@ -1820,24 +1969,7 @@ function Analyzer() {
 			var p2 = small[k]
 			if (k in big) {
 				var p1 = big[k]
-				if (p1.type === 'node') {
-					if (p2.type === 'node') {
-						unifyLater(p1.node, p2.node)
-					} else {
-						p2.types.forEach(function(t) {
-							addTypeLater(p1.node, t)
-						})
-					}
-				} else {
-					if (p2.type === 'node') {
-						big[k] = p2
-						p1.types.forEach(function(t) {
-							addTypeLater(p2.node, t)
-						})
-					} else {
-						p1.types.addAll(p2.types)
-					}
-				}
+				big[k] = unifyNodeProperties(p1, p2)
 			} else {
 				big[k] = p2
 				big.size++
@@ -1852,7 +1984,16 @@ function Analyzer() {
 		n1._resolved_refs.addAll(n2._resolved_refs)
 		n1._prototypes = mergeArrays(n1._prototypes, n2._prototypes)
 		n1._isObject |= n2._isObject
-		n1._isAny |= n2._isAny
+		// if (n1._isFree || n2._isFree) {
+		// 	console.trace('unfying free nodes: ' + n1._isFree + ', ' + n2._isFree)
+		// 	if (!n1._isFree)
+		// 		console.log(n1.origin)
+		// 	if (!n2._isFree) {
+		// 		console.log(n2.origin)
+		// 		n1.origin = n2.origin // trace the non-free node
+		// 	}
+		// }
+		n1._isFree &= n2._isFree
 		n1.global |= n2.global
 
 		// clean up
@@ -1866,11 +2007,15 @@ function Analyzer() {
 	}
 
 	function addTypeLater(node, type) {
+		if (!node || !type)
+			throw new Error
 		queue.push(type)
 		queue.push(node)
 	}
 
 	function unifyLater(n1, n2) {
+		if (!(n1 instanceof UNode) || !(n2 instanceof UNode))
+			throw new Error
 		if (n1 !== n2) {
 			queue.push(n1)
 			queue.push(n2)
@@ -2304,15 +2449,18 @@ function Analyzer() {
 				case 'ArrayExpression':
 					var n = getNode(node)
 					n.isObject = true
+					n.makeLevel(LEVEL_ARRAY)
+					var elmNode = n.getPrty(0)
+					n.addType({type: 'reference', name:'Array', typeArguments:[{type: 'node', node: elmNode}]})
 					node.elements.forEach(function(elm, i) {
 						if (!elm)
 							return
 						visitExp(elm, NOT_VOID)
-						n = n.rep()
-						unify(elm, n.getPrty(String(i)))
+						unify(elm, elmNode)
 					})
-					n.addType({type: 'reference', name:'Array', typeArguments:[{type: 'node', node: n.getPrty(0)}]})
-					// addNativePrototype(n, "Array.prototype")
+					if (node.elements.length === 0) {
+						elmNode.isFree = true // an empty array can be typed as an array of any type
+					}
 					return NOT_NULL
 				case 'ObjectExpression':
 					getNode(node).isObject = true
@@ -2461,6 +2609,7 @@ function Analyzer() {
 					}
 				case 'UpdateExpression':
 					visitExp(node.argument, NOT_VOID)
+					unify(node, node.argument) // unify to stop unsound constant propagation
 					assumeType(node, {type: 'number'})
 					return NOT_NULL
 				case 'LogicalExpression':
@@ -2599,17 +2748,22 @@ function Analyzer() {
 			// Resolve dynamic access
 			complete()
 			unresolved_dynamic_accesses.forEach(function(dnode) {
-				if (dnode.object.isAny)
-					return // nothing to do
+				// if (dnode.object.isAny)
+				// 	return // nothing to do
+				if (dnode.property.isAny) {
+					dnode.object.makeLevel(LEVEL_DICT)
+					unify(dnode.object.getPrty(0), dnode.value)
+				}
 				dnode.property.primitives.forEach(function(t) {
 					switch (t.type) {
 						case 'number':
-							unify(dnode.object.getPrty(0), dnode.value) // TODO
+							dnode.object.makeLevel(LEVEL_ARRAY)
+							unify(dnode.object.getPrty(0), dnode.value)
 							break; 
 						case 'string':
-							// dnode.object.makeAny()
-							// dnode.value.makeAny() // TODO: lvalue vs rvalue??
-							break; // TODO collapse property names??
+							dnode.object.makeLevel(LEVEL_DICT)
+							unify(dnode.object.getPrty(0), dnode.value)
+							break;
 						case 'string-const':
 						case 'value':
 							unify(dnode.object.getPrty(String(t.value)), dnode.value)
@@ -2626,6 +2780,8 @@ function Analyzer() {
 					proto = proto.rep()
 					if (proto === child)
 						return
+					child.makeLevel(proto.level)
+
 					// compare properties that are present on both nodes
 					// iterate over the smallest map to speed things up
 					if (proto.properties.size > child.properties.size) {
@@ -2675,6 +2831,7 @@ function Analyzer() {
 					})
 					unify(fnode.self, ecall.self)
 					if (ecall.sig.new) {
+						fnode.this.isObject = true
 						// TODO: establish inheritance?
 					} else {
 						if (ecall.receiver) {
@@ -2704,12 +2861,20 @@ function Analyzer() {
 								break;
 							case 'object':
 								for (var k in type.properties) {
-									var dst = node.properties.get(k)
-									if (dst) {
-										demandPrtyVsType(dst, type.properties[k].type)
+									var name = node.translateName(k)
+									if (name === null) { // if node is 'any', recursively demand type against 'any'
+										demandNodeVsType(node, type.properties[k].type)
+									} else {
+										var dst = node.properties.get(name)
+										if (dst) {
+											demandPrtyVsType(dst, type.properties[k].type)
+										}
 									}
 								}
 								if (type.numberIndexer) {
+									if (node.isAny) {
+										demandNodeVsType(node, type.numberIndexer)
+									}
 									node.properties.forEach(function(name,dst) {
 										if (isNumberString(name)) {
 											demandPrtyVsType(dst, type.numberIndexer)
@@ -2717,6 +2882,9 @@ function Analyzer() {
 									})
 								}
 								if (type.stringIndexer) {
+									if (node.isAny) {
+										demandNodeVsType(node, type.stringIndexer)
+									}
 									node.properties.forEach(function(name,dst) {
 										// TODO: enumerability check?
 										demandPrtyVsType(dst, type.stringIndexer)
@@ -2765,7 +2933,7 @@ function Analyzer() {
 								if (t.type !== 'object')
 									return
 								for (var k in type.properties) {
-									if (k in t.properties) {
+									if (t.properties.hasOwnProperty(k)) {
 										demandTypeVsType(t.properties[k].type, type.properties[k].type)
 									}
 								}
@@ -2869,6 +3037,7 @@ function Analyzer() {
 					var tcheck = makeTypeChecker(sig.typeParameters)
 					var applicable = true
 					sig.parameters.forEach(function(param, i) {
+						i = call.arguments.translateName(String(i))
 						if (!call.arguments.properties.has(i)) {
 							applicable &= param.optional
 							return
@@ -3003,12 +3172,15 @@ function Analyzer() {
 			if (!receiver)
 				receiver = node
 			node = node.rep()
-			var dst = node.properties.get(k)
+			if (node.isAny || node.isFree)
+				return true
+			var name = node.translateName(k)
+			var dst = node.properties.get(name)
 			if (dst) {
 				return isPrtyCompatibleWithType(dst, prty.type, path, receiver)
 			} else {
 				var protoWithPrty = node.prototypes.filter(function(proto) {
-					return proto.properties.has(k)
+					return proto.properties.has(name)
 				})
 				protoWithPrty = protoWithPrty.unique(function(proto) { return proto.rep().id })
 				if (protoWithPrty.length === 0) {
@@ -3018,7 +3190,7 @@ function Analyzer() {
 					}
 					return true
 				} else if (protoWithPrty.length === 1) {
-					return isPrtyCompatibleWithType(protoWithPrty[0].properties.get(k), prty.type, path, receiver)
+					return isPrtyCompatibleWithType(protoWithPrty[0].properties.get(name), prty.type, path, receiver)
 				} else {
 					var h = node.id + '~' + k + '~' + prty.optional + '.' + canonicalizeType(prty.type)
 					if (h in node_prty_compatible)
@@ -3038,7 +3210,7 @@ function Analyzer() {
 		var node_type_compatible = Object.create(null)
 		function isNodeCompatibleWithType(node, type, path, receiver) {
 			node = node.rep()
-			if (node.isAny) {
+			if (node.isAny || node.isFree) {
 				return true
 			}
 			var h = canonicalizeType(type) + "~" + node.id // TODO: include receiver??
@@ -3239,7 +3411,7 @@ function Analyzer() {
 						return false
 					}
 					for (var k in t2.properties) {
-						if (k in t1.properties) {
+						if (t1.properties.hasOwnProperty(k)) {
 							if (!isTypeCompatibleWithType(t1.properties[k].type, t2.properties[k].type, qualify(path,k))) {
 								return false
 							}
@@ -3318,10 +3490,10 @@ function Analyzer() {
 					bound_nodes.push({type: 'type', node: t2.node, bound: t1})
 					return true
 				case 'type-param':
-					if (!bound_type_params.has(type.name))
-						throw new Error("Unbound type parameter " + type.name)
+					if (!bound_type_params.has(t2.name))
+						throw new Error("Unbound type parameter " + t2.name)
 					// TODO: check constraint
-					bound_type_params.push(type.name, {type: 'type', bound: t1})
+					bound_type_params.push(t2.name, {type: 'type', bound: t1})
 					return true
 				case 'opaque-type':
 					if (t1.type === 'opaque-type' && t1.name === t2.name)
@@ -3334,11 +3506,32 @@ function Analyzer() {
 					throw new Error("Unexpected type: " + t2.type)
 			}
 		}
+		function isCallCompatibleWithCall(incall, outcall) {
+			// TODO: type parameters
+			// TODO: variadic
+
+			// Check that the parameters to outcall can be used in a valid call to incall
+			for (var i=0; i<incall.parameters.length; ++i) {
+				var iparm = incall.parameters[i]
+				if (i < outcall.parameters.length) {
+					var oparm = outcall.parameters[i]
+					if (!isTypeCompatibleWithType(oparm.type, iparm.type, null)) {
+						return false
+					}
+				} else if (!iparm.optional) {
+					return false
+				}
+			}
+
+			// Check that return type from incall is a valid return type from outcall
+			return isTypeCompatibleWithType(incall.returnType, outcall.returnType, null)
+		}
 		return {
 			isTypeCompatibleWithType: isTypeCompatibleWithType,
 			isNodeCompatibleWithType: isNodeCompatibleWithType,
 			isPrtyCompatibleWithType: isPrtyCompatibleWithType,
 			isNodeCompatibleWithProperty: isNodeCompatibleWithProperty,
+			isCallCompatibleWithCall: isCallCompatibleWithCall,
 			getBoundTypeParams: function() { return bound_type_params },
 			getBoundNodes: function() { return bound_nodes },
 			getCallSigMatches: function() { return callSigMatches }
@@ -3441,12 +3634,21 @@ function Analyzer() {
 
 		if (!ok && !sig.new)
 			return
+		if (resultNode.isAny)
+			return
 
 		var toCheck = []
 		tcheck.getCallSigMatches().forEach(function(cmatch) {
+			var ok = cmatch.node.call_sigs.some(function(s) {
+				return tcheck.isCallCompatibleWithCall(s, cmatch.callsig)
+			})
+			if (ok)
+				return
+
 			var sig = instantiateOpaqueSignature(cmatch.callsig)
 			resolveEntryCallLater(new EntryCallNode(cmatch.node, cmatch.receiver, sig))
 			toCheck.push({
+				new: sig.new,
 				node: cmatch.node,
 				type: sig.returnType,
 				path: cmatch.path + sig2path(cmatch.callsig)
@@ -3457,13 +3659,18 @@ function Analyzer() {
 		tcheck = makeTypeChecker()
 
 		toCheck.forEach(function(chk) {
+			var resultNodes = []
 			chk.node.rep().functions.forEach(function(fun) {
 				if (fun.type !== 'user')
-					return
+					return true
 				var fnode = getSharedFunctionNode(getFunction(fun.id), fun.context)
-
-				tcheck.isNodeCompatibleWithType(fnode.return, chk.type, chk.path)
+				var resultNode = chk.new ? fnode.this : fnode.return
+				resultNodes.push(resultNode.rep())
+				// return tcheck.isNodeCompatibleWithType(resultNode, chk.type, chk.path)
 			})
+			if (resultNodes.length === 1) {
+				tcheck.isNodeCompatibleWithType(resultNodes[0], chk.type, chk.path)
+			}
 		})
 
 		return ok
@@ -3594,27 +3801,6 @@ function Analyzer() {
 	}
 }
 
-
-function isCallSubtypeOf(incall, outcall) {
-	// TODO: type parameters
-	// TODO: variadic
-
-	// Check that the parameters to outcall can be used in a valid call to incall
-	for (var i=0; i<incall.parameters.length; ++i) {
-		var iparm = incall.parameters[i]
-		if (i < outcall.parameters.length) {
-			var oparm = outcall.parameters[i]
-			if (!isTypeCompatible(oparm.type, iparm.type, {type: 'any'})) {
-				return false
-			}
-		} else if (!iparm.optional) {
-			return false
-		}
-	}
-
-	// Check that return type from incall is a valid return type from outcall
-	return isTypeCompatible(incall.returnType, outcall.returnType, {type: 'any'})
-}
 
 
 
