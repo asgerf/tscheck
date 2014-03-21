@@ -2673,6 +2673,7 @@ function Analyzer() {
 					ecall.sig.parameters.forEach(function(param,i) {
 						fnode.arguments.getPrty(i).addType(param.type)
 					})
+					unify(fnode.self, ecall.self)
 					if (ecall.sig.new) {
 						// TODO: establish inheritance?
 					} else {
