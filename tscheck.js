@@ -677,6 +677,7 @@ function getCallSigsForNative(key) {
 // ------------------------------------------------------------
 
 var object2brands = new Map
+var valid_brands = Object.create(null)
 function markBrands() {
 	var visited = Object.create(null)
 	function visit(type) {
@@ -689,6 +690,7 @@ function markBrands() {
 					var obj = lookupPath(type.brand + '.prototype', function(){return null})
 					if (obj && typeof obj === 'object') {
 						object2brands.push(obj.key, type.brand)
+						valid_brands[type.brand] = true
 					}
 				}
 				for (var k in type.properties) {
@@ -707,11 +709,26 @@ function markBrands() {
 		visit(typeDecl.env[k].object)
 	}
 	visit({type: 'reference', name: typeDecl.global, typeArguments:[]})
+
+	// function debugBrands(path) {
+	// 	var v = lookupPath(path)
+	// 	var brands = []
+	// 	while (v && typeof v === 'object') {
+	// 		brands = brands.concat(getObjectBrands(v.key))
+	// 		v = lookupObject(v.key).prototype
+	// 	}
+	// 	console.log('brands for ' + path + ' = ' + brands.join(','))
+	// }
+	//  debugBrands('L.Control.Scale.prototype')
+	// console.log('brands for L.Control.Scale.prototype = ' + getObjectBrands(lookupPath('L.Control.Scale.prototype').key).join(','))
 }
 onLoaded(markBrands)
 
 function getObjectBrands(key) {
 	return object2brands.get(key) || []
+}
+function isValidBrand(brand) {
+	return !!valid_brands[brand]
 }
 
 // ------------------------------------------------------------
@@ -1226,10 +1243,12 @@ function formatNode(node) {
 	if (node.isObject) {
 		if (node.brands.length > 0) {
 			node.brands.forEach(function(brand) {
-				if (brand[0] === 'P')
-					b.push(brand.substring(1) + '.prototype')
-				else
-					b.push(brand.substring(1))
+				b.push(brand)
+			})
+			node.prototypes.forEach(function(proto) {
+				proto.brands.forEach(function(brand) {
+					b.push(brand)
+				})
 			})
 		} else {
 			b.push('object')
@@ -2252,14 +2271,10 @@ function Analyzer() {
 				}
 			}
 			// collect brands from prototype
-			var isBrandObject = (getObjectBrands(i).length > 0)
 			var proto = {key: i}
 			while (proto) {
 				getObjectBrands(proto.key).forEach(function(brand) {
-					if (isBrandObject)
-						n.brands.push('P' + brand) // mark as prototype object of this brand
-					else
-						n.brands.push('I' + brand) // mark as instance of this brand
+					n.brands.push(brand)
 				})
 				proto = lookupObject(proto.key).prototype
 			}
@@ -3359,23 +3374,20 @@ function Analyzer() {
 						ok = false
 						return false
 					}
-					if (type.brand) {
-						ok = node.brands.some('I' + type.brand)
+					if (type.brand && isValidBrand(type.brand)) {
+						var hasBrand = !node.brands.isEmpty()
+						ok = node.brands.some(type.brand)
 						if (!ok) {
 							ok = node.prototypes.some(function(proto) {
-								return proto.brands.some('P' + type.brand)
+								return hasBrand |= proto.brands.some(type.brand)
 							})
 						}
-						// if (!ok) {
-						// 	ok = node.types.some(function(t) {
-						// 		if (t.type === 'reference')
-						// 			t = resolveTypeRef(t)
-						// 		return t.type === 'object' && t.brand === type.brand
-						// 	})
-						// }
 						if (!ok) {
-							reportError(path, 'expected ' + type.brand + ' but found ' + formatNode(node))
-							// reportError(path, 'missing prototype for branded type ' + type.brand)
+							if (hasBrand) {
+								reportError(path, 'expected ' + type.brand + ' but found ' + formatNode(node) + ' [BRAND]')
+							} else {
+								reportError(path, 'missing prototype for branded type ' + type.brand)
+							}
 						}
 						if (!continueOnError)
 							return ok // defer checking of other properties to the constructor check
@@ -3764,7 +3776,6 @@ function Analyzer() {
 			call.this.isObject = true
 			call.this.prototypes.push(getConcreteObject(function_key).getPrty('prototype'))
 			resolveInheritLater(call.this)
-			// call.this = getConcreteObject(function_key).getPrty('prototype') // TODO: proper inheritance instead of this
 		} else {
 			call.this = getConcreteObject(receiver_key)
 		}
