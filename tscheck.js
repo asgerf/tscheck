@@ -8,10 +8,11 @@ var util = require('util');
 var esprima = require('esprima');
 
 var program = require('commander');
-program.usage("FILE.jsnap FILE.d.ts [options]")
+program.usage("FILE.js FILE.d.ts [options]")
 program.option('--compact', 'Report at most one violation per type path')
 	   .option('--suggest', 'Suggest additions to the interface')
 	   .option('--coverage', 'Print declaration file coverage')
+	   .option('--no-analysis', 'Skip static analysis (much faster)')
 	   .option('--no-warn', 'Squelch type errors')
 	   .option('--no-jsnap', 'Do not regenerate .jsnap file, even if older than .js file')
 	   .option('--verbose', 'More verbose fatal error messages')
@@ -939,6 +940,8 @@ var num_callsigs_analyzed = 0;
 
 var shared_analyzer;
 function checkCallSignature(call, receiverKey, functionKey, path) {
+	if (!program.analysis)
+		return
 	if (program.path && !path.has(program.path))
 		return
 	if (call.returnType.type === 'any' || call.returnType.type === 'void')
