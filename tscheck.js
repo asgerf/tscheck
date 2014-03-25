@@ -16,6 +16,7 @@ program.option('--compact', 'Report at most one violation per type path')
 	   .option('--no-jsnap', 'Do not regenerate .jsnap file, even if older than .js file')
 	   .option('--verbose', 'More verbose fatal error messages')
 	   .option('--path <STR>', 'Report only warnings on the given path', String, '')
+	   .option('--stats', 'Print statistics')
 program.parse(process.argv);
 
 if (program.args.length === 0) {
@@ -585,6 +586,8 @@ onLoaded(function() {
 	StringPrototype = lookupPath("String.prototype");
 	BooleanPrototype = lookupPath("Boolean.prototype");
 	FunctionPrototype = lookupPath("Function.prototype");	
+	RegExpPrototype = lookupPath("RegExp.prototype");
+	ArrayPrototype = lookupPath("Array.prototype");
 })
 
 function coerceToObject(x) {
@@ -932,6 +935,8 @@ function hasBrand(value, brand) {
 	return false;
 }
 
+var num_callsigs_analyzed = 0;
+
 var shared_analyzer;
 function checkCallSignature(call, receiverKey, functionKey, path) {
 	if (program.path && !path.has(program.path))
@@ -951,6 +956,7 @@ function checkCallSignature(call, receiverKey, functionKey, path) {
 
 	analyzer = null
 	runGC()
+	num_callsigs_analyzed++;
 	// if (!ok) {
 	// 	console.log(path + ": does not satisfy signature " + formatTypeCall(call))
 	// }
@@ -1871,6 +1877,15 @@ function Analyzer() {
 				return null
 		}
 	}
+	UNode.prototype.coerceToObject = function() {
+		var self = this.rep()
+		self.primitives.forEach(function(t) {
+			t = primitiveToObjectType(t)
+			if (t) {
+				self.addType(t)
+			}
+		})
+	}
 	UNode.prototype.addType = function(t) {
 		if (unode_current_function === null)
 			throw new Error
@@ -2026,6 +2041,17 @@ function Analyzer() {
 	}
 
 	function unifyNow(n1, n2) {
+		n1 = n1.rep()
+		n2 = n2.rep()
+		if (n1 === n2)
+			return
+
+		if (n1.properties.size === 0 && n2.properties.size > 0) {
+			n1.coerceToObject()
+		} else if (n1.properties.size > 0 && n2.properties.size === 0) {
+			n2.coerceToObject()
+		}
+		
 		n1 = n1.rep()
 		n2 = n2.rep()
 		if (n1 === n2)
@@ -2389,7 +2415,7 @@ function Analyzer() {
 		var env = new UNode
 		unify(env.getPrty(ENV), fnode.self.getPrty(ENV))
 
-		fnode.env = env // FIXME: remove when not debugging
+		// fnode.env = env // FIXME: remove when not debugging
 
 		if (fun.type === 'FunctionExpression' && fun.id) {
 			unify(env.getPrty(fun.id.name), fnode.self)
@@ -3168,7 +3194,8 @@ function Analyzer() {
 					sig.parameters.forEach(function(param, i) {
 						i = call.arguments.translateName(String(i))
 						if (!call.arguments.properties.has(i)) {
-							applicable &= param.optional
+							var optional = param.optional || (sig.variadic && i === sig.parameters.length-1) // last param of variadic functions is optional
+							applicable &= optional
 							return
 						}
 						applicable &= tcheck.isPrtyCompatibleWithType(call.arguments.properties.get(i), param.type)
@@ -3180,8 +3207,9 @@ function Analyzer() {
 							applicable &= tcheck.isPrtyCompatibleWithType(prty, sig.parameters.last().type)
 						})
 					}
-					if (!applicable && !sig.unique)
+					if (!applicable && !sig.unique) {
 						return
+					}
 
 					changed = true
 					call.resolved_sigs.add(sig)
@@ -3255,7 +3283,7 @@ function Analyzer() {
 			return path + '.' + k
 	}
 	function reportError(path, msg) {
-		if (!path)
+		if (!path || !program.warn)
 			return
 		console.log(path + ': ' + msg)
 	}
@@ -3765,6 +3793,7 @@ function Analyzer() {
 	}
 
 	this.checkSignature = function(sig, function_key, receiver_key, path) {
+		setCurrentFunction(main_function)
 		var call = new CallNode({new:sig.new, context: '0'})
 
 		var originalSig = sig;
@@ -3777,7 +3806,31 @@ function Analyzer() {
 			call.this.prototypes.push(getConcreteObject(function_key).getPrty('prototype'))
 			resolveInheritLater(call.this)
 		} else {
-			call.this = getConcreteObject(receiver_key)
+			switch (receiver_key) {
+				case ObjectPrototype.key:
+					call.this.isObject = true;
+					break;
+				case StringPrototype.key:
+					call.this.addType({type: 'string'})
+					break;
+				case NumberPrototype.key:
+					call.this.addType({type: 'number'})
+					break;
+				case BooleanPrototype.key:
+					call.this.addType({type: 'boolean'})
+					break;
+				case FunctionPrototype.key:
+					call.this.addType({type: 'reference', name: 'Function', typeArguments:[]})
+					break;
+				case ArrayPrototype.key:
+					call.this.addType({type: 'reference', name: 'Array', typeArguments:[{type: 'any'}]})
+					break;
+				case RegExpPrototype.key:
+					call.this.addType({type: 'reference', name: 'RegExp', typeArguments: []})
+					break;
+				default: // note: this is by far the most common case
+					call.this = getConcreteObject(receiver_key)
+			}
 		}
 		sig.parameters.forEach(function(param,i) {
 			call.arguments.properties.put(i, {
@@ -4052,6 +4105,9 @@ function main() {
 	}
 	if (program.coverage) {
 		printCoverage();
+	}
+	if (program.stats) {
+		console.log("# call signatures = " + num_callsigs_analyzed)
 	}
 }
 
