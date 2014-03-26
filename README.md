@@ -44,6 +44,8 @@ tscheck can take several minutes to complete. If you are impatient, pass the fla
 
 If you wish to check a specific part of the API, you can pass the flag `--path foo` to only check paths that contain the string `foo`; this will typically speed things up a lot.
 
+If tscheck seems to get stuck, try passing `--expose-gc` to the node process. This alleviates a problem with the v8 garbage collector.
+
 Note that even for tiny `.d.ts` files, tscheck still has a warm-up time of a few seconds due to parsing TypeScript's `lib.d.ts` file.
 
 About **tscore**

@@ -1,8 +1,0 @@
-set -e
-DIR="testcases"
-
-FILES=`find $DIR -name "*.d.ts"`
-for file in $FILES
-do
-	./tsconvert.js --lib $file > $file.json
-done

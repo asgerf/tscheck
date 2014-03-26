@@ -2,8 +2,8 @@
 var fs = require('fs');
 var tscore = require('./tscore');
 require('sugar');
-var Map = require('./map');
-var SMap = require('./smap')
+var Map = require('./lib/map');
+var SMap = require('./lib/smap')
 var util = require('util');
 var esprima = require('esprima');
 

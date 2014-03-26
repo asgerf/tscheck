@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-var TypeScript = require('./ts')
+var TypeScript = require('./lib/ts')
 var fs = require('fs')
-var Map = require('./map')
+var Map = require('./lib/map')
 require('sugar')
 var util = require('util')
 
