@@ -73,7 +73,7 @@ function getArgumentWithExtension(ext) {
 }
 var snapshotWasGenerated = false
 function generateSnapshot(jsfile, jsnapfile, callback) {
-	var jsnap = require('../jsnap/jsnap')
+	var jsnap = require('jsnap')
 	snapshotWasGenerated = true
 	var fd = fs.openSync(jsnapfile, 'w')
 	var proc = jsnap({
