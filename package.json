@@ -1,9 +1,25 @@
 {
+  "name": "tscheck",
+  "version": "0.1.0",
+  
   "dependencies": {
     "sugar": "",
     "commander": "",
     "esprima": "~1.0.4",
-    "escodegen": "",
     "jsnap": "asgerf/jsnap"
+  },
+  "files": ["lib", "tscheck.js", "tscore.js"],
+  "bin": "tscheck.js",
+
+
+  "description": "Find bugs in hand-written TypeScript type definitions.",
+  "homepage": "http://github.com/asgerf/tscheck",
+  "author": {
+      "name": "Asger Feldthaus",
+      "email": "asf@cs.au.dk"
+  },
+  "repository" : {
+    "type" : "git",
+    "url" : "http://github.com/asgerf/tscheck"
   }
 }

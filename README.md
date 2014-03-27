@@ -7,10 +7,7 @@ Installation
 ------------
 
  - Install [node.js](http://nodejs.org/) if you don't already have it.
- - Install [jsnap](https://github.com/asgerf/jsnap) and put `jsnap` on your PATH
- - Clone this repository 
- - `npm install` to install dependencies
- - We suggest adding `tscheck.js` to your PATH
+ - `npm install -g tscheck`
 
 Usage
 -----
