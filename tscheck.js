@@ -2621,14 +2621,20 @@ function Analyzer() {
 								unify(getNode(node).getPrty(name), p.value)
 								break;
 							case 'get':
-								unify(node, getThis(p.value))
-								unify(getNode(node).getPrty(name), getReturn(p.value))
+								setCurrentFunction(null)
+								var inner = makeFunction(p.value)
+								setCurrentFunction(fnode)
+								unify(node, inner.this)
+								unify(env, inner.self.getPrty(ENV))
+								unify(getNode(node).getPrty(name), inner.return)
 								break;
 							case 'set':
-								unify(node, getThis(p.value))
-								if (p.value.params.length >= 1) {
-									unify(getNode(node).getPrty(name), p.value.params[0])
-								}
+								setCurrentFunction(null)
+								var inner = makeFunction(p.value)
+								setCurrentFunction(fnode)
+								unify(node, inner.this)
+								unify(env, inner.self.getPrty(ENV))
+								unify(getNode(node).getPrty(name), inner.arguments.getPrty(0))
 								break;
 						}
 					})
