@@ -1549,10 +1549,10 @@ function Analyzer() {
 	var graphviz_functions = []
 	var graphviz_nodes = []
 	function includeFunctionInGraphviz(x) {
-		graphviz_functions.push(x)
+		// graphviz_functions.push(x)
 	}
 	function includeNodeInGraphviz(x) {
-		graphviz_nodes.push(x)
+		// graphviz_nodes.push(x)
 	}
 
 	//////////////////////////
@@ -2313,7 +2313,6 @@ function Analyzer() {
 				return
 			var n = object2node[i].rep()
 			if (obj.env) {
-				// console.log("Unifying environment")
 				includeNodeInGraphviz(n)
 				unifyNow(n.getPrty(ENV), getConcreteObject(obj.env.key))
 			}
@@ -4110,6 +4109,7 @@ function main() {
 		printCoverage();
 	}
 	if (program.stats) {
+		console.log("# heap objects = " + snapshot.heap.length)
 		console.log("# call signatures = " + num_callsigs_analyzed)
 	}
 }
