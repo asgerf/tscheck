@@ -10,7 +10,7 @@ var esprima = require('esprima');
 var program = require('commander');
 program.usage("FILE.js FILE.d.ts [options]")
 program.option('--compact', 'Report at most one violation per type path')
-	   .option('--suggest', 'Suggest additions to the interface')
+	   .option('--missing', 'Report paths that are missing types (implies no-warn)')
 	   .option('--coverage', 'Print declaration file coverage')
 	   .option('--no-analysis', 'Skip static analysis (much faster)')
 	   .option('--no-warn', 'Squelch type errors')
@@ -18,10 +18,32 @@ program.option('--compact', 'Report at most one violation per type path')
 	   .option('--verbose', 'More verbose fatal error messages')
 	   .option('--path <STR>', 'Report only warnings on the given path', String, '')
 	   .option('--stats', 'Print statistics')
+	   .option('--runtime [browser|node]', 'Runtime environment to use (default: browser)', String, 'browser')
 program.parse(process.argv);
 
 if (program.args.length === 0) {
 	program.help()
+}
+
+function fatalError(msg, e) {
+	console.error(msg)
+	if (program.verbose && e) {
+		console.error(e.stack)
+	}
+	process.exit(1)
+}
+
+switch (program.runtime) {
+	case 'browser':
+	case 'node':
+		break;
+	default:
+		fatalError('Invalid runtime: ' + program.runtime)
+}
+
+if (program.missing) {
+	program.analysis = false
+	program.warn = false
 }
 
 function runGC() {
@@ -51,11 +73,14 @@ function getArgumentWithExtension(ext) {
 }
 var snapshotWasGenerated = false
 function generateSnapshot(jsfile, jsnapfile, callback) {
+	var jsnap = require('../jsnap/jsnap')
 	snapshotWasGenerated = true
-	// console.log("Regenerating jsnap file `" + jsnapfile + "` from `" + jsfile + "`")
-	var spawn = require('child_process').spawn
 	var fd = fs.openSync(jsnapfile, 'w')
-	var proc = spawn('jsnap', [jsfile], {stdio:['ignore',fd,2]})
+	var proc = jsnap({
+		files: [jsfile],
+		stdio: ['ignore', fd, 2],
+		runtime: program.runtime
+	})
 	proc.on('exit', function() {
 		fs.close(fd)
 	})
@@ -88,13 +113,6 @@ function onLoaded(fn) {
 	}
 }
 
-function fatalError(msg, e) {
-	console.error(msg)
-	if (program.verbose && e) {
-		console.error(e.stack)
-	}
-	process.exit(1)
-}
 
 var LIB_ORIGIN = ">lib.d.ts"; // pad origin with ">" to ensure it does not collide with user input
 
@@ -116,9 +134,10 @@ function initialize() {
 		fatalError("Could not find " + typeDeclFile)
 	}
 
-	var snapshotFile = getArgumentWithExtension('jsnap')
+	var jsnapExt = program.runtime === 'browser' ? 'jsnap' : 'jsnap_node';
+	var snapshotFile = getArgumentWithExtension(jsnapExt)
 	if (!snapshotFile) {
-		snapshotFile = sourceFile + 'nap' // replace .js -> .jsnap
+		snapshotFile = sourceFile + jsnapExt.substring(2) // replace .js -> .jsnap(_node)
 	}
 	
 	if (program.jsnap) {
@@ -1016,8 +1035,8 @@ function findSuggestions() {
 		})
 		names.forEach(function(name,count) {
 			var alwaysPresent = (count === values.length);
-			var optStr = alwaysPresent ? '' : '(optional)';
-			console.log(qualify(tpath,name) + ': missing from .d.ts ' + optStr)
+			var optStr = alwaysPresent ? '' : ' (optional)';
+			console.log(qualify(tpath,name) + optStr)
 		})
 	})
 }
@@ -4108,7 +4127,7 @@ function pointsToDot(nodes) {
 function main() {
 	// TODO: move loading of inputs into main function
 	check(lookupQType(typeDecl.global,[]), {key: snapshot.global}, '', false, null, '<global>');
-	if (program.suggest) {
+	if (program.missing) {
 		findSuggestions()
 	}
 	if (program.coverage) {

@@ -3,6 +3,7 @@
     "sugar": "",
     "commander": "",
     "esprima": "~1.0.4",
-    "escodegen": ""
+    "escodegen": "",
+    "jsnap": "asgerf/jsnap"
   }
 }

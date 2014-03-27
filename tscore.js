@@ -15,7 +15,6 @@ function TypeError(msg) {
 }
 
 // NOTE: some aliasing of TObject occurs when type parameter bounds are copied into constructor type parameters
-// TODO: desugar varargs correctly (array vs non-array type)
 
 // --------------------
 // Scope Chains
