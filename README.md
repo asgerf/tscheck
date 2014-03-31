@@ -52,7 +52,7 @@ If your `.d.ts` file depends on other files you must concatenate them yourself b
 
 Please run `tsc` on your `.d.ts` file before running tscheck. tscheck assumes that your `.d.ts` passes some well-formedness checks performed by the TypeScript compiler, and will react violently otherwise.
 
-
+tscheck will leave a `.jsnap` file next to your `.js` file. It contains a snapshot created with [jsnap](https://github.com/asgerf/jsnap). Feel free to delete it; tscheck will regenerate if necessary, although it speeds things up a bit if you leave it there.
 
 About **tscore**
 ============
