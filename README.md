@@ -45,6 +45,15 @@ If tscheck seems to get stuck, try passing `--expose-gc` to the node process. Th
 
 Note that even for tiny `.d.ts` files, tscheck still has a warm-up time of a few seconds due to parsing TypeScript's `lib.d.ts` file.
 
+Other Usage Notes
+-----------------
+
+If your `.d.ts` file depends on other files you must concatenate them yourself before feeding them to tscheck. Likewise, the JavaScript library must be compiled to a single `.js` file.
+
+Please run `tsc` on your `.d.ts` file before running tscheck. tscheck assumes that your `.d.ts` passes some well-formedness checks performed by the TypeScript compiler, and will react violently otherwise.
+
+
+
 About **tscore**
 ============
 
