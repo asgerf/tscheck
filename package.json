@@ -1,12 +1,12 @@
 {
   "name": "tscheck",
-  "version": "0.1.0",
+  "version": "0.1.1",
   
   "dependencies": {
     "sugar": "",
     "commander": "",
     "esprima": "~1.0.4",
-    "jsnap": "asgerf/jsnap"
+    "jsnap": ""
   },
   "files": ["lib", "tscheck.js", "tscore.js"],
   "bin": "tscheck.js",
