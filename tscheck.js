@@ -2004,6 +2004,27 @@ function Analyzer() {
 						this.properties.put(0, ut)
 					}
 				}
+				if (t.stringIndexer) {
+					this.makeLevel(LEVEL_DICT)
+					var dst = this.properties.get(0)
+					if (dst) {
+						if (dst.type === 'node') {
+							dst.node.addType(t.stringIndexer)
+						} else if (dst.type === 'union') {
+							dst.types.add(t.stringIndexer)
+						} else {
+							throw new Error
+						}
+					} else if (t.stringIndexer.type === 'node') {
+						this.properties.put(0, {type: 'node', node: t.stringIndexer.node})
+					} else {
+						var ut = {
+							type: 'union',
+							types: singleton(t.stringIndexer)
+						}
+						this.properties.put(0, ut)
+					}
+				}
 				if (t.brand) {
 					var obj = lookupPath(t.brand + '.prototype', function(){return null})
 					if (obj && typeof obj === 'object') {
@@ -2013,7 +2034,6 @@ function Analyzer() {
 						}
 					}
 				}
-				// TODO: string indexers
 				break;
 			case 'number':
 			case 'string':
