@@ -1255,7 +1255,7 @@ function formatUnion(ut) {
 	if (ut.has({type:'any'}))
 		return 'any'
 	var b = []
-	ut.forEach(function(t) {
+	ut.forEachPrimitive(function(t) {
 		b.push(formatType(t))
 	})
 	if (b.length === 0) {
@@ -1282,10 +1282,9 @@ function formatNode(node) {
 			b.push('object')
 		}
 	}
-	node.primitives.forEach(function(t) {
+	node.primitives.forEachPrimitive(function(t) {
 		b.push(formatType(t))
 	})
-	// PRINT BRANDS
 	if (b.length === 0) {
 		return 'nothing'
 	} else {
@@ -1386,6 +1385,28 @@ function TypeSet() {}
 TypeSet.prototype = Object.create(HashSet.prototype)
 TypeSet.prototype.hash = canonicalizeType
 TypeSet.prototype.constructor = TypeSet
+
+// Variant of forEach that filters out value types that are redundant due to a more general type in the set
+TypeSet.prototype.forEachPrimitive = function(fn) {
+	var self = this
+	this.forEach(function(t) {
+		if (t.type === 'value') {
+			switch (typeof t.value) {
+				case 'string':
+				case 'number':
+				case 'boolean':
+					if (self.has({type: typeof t.value}))
+						return
+					break
+				case 'undefined':
+					if (self.has({type: 'void'}))
+						return
+					break
+			}
+		}
+		fn(t)
+	})
+}
 
 function ValueSet() {}
 ValueSet.prototype = Object.create(HashSet.prototype)
@@ -3804,7 +3825,7 @@ function Analyzer() {
 		if (node.isAny)
 			return 'any'
 		var b = []
-		node.primitives.forEach(function(t) {
+		node.primitives.forEachPrimitive(function(t) {
 			b.push(formatType(t))
 		})
 		if (node.isObject)
