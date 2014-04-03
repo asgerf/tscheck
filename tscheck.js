@@ -1180,7 +1180,8 @@ function formatTypeParameter(tparam) {
 function formatTypeCall(call) {
 	var newstr = call.new ? 'new' : '';
 	var tparams = call.typeParameters.length === 0 ? '' : ('<' + call.typeParameters.map(formatTypeParameter).join(',') + '>')
-	return newstr + tparams + '(' + call.parameters.map(formatParameter).join(', ') + ') => ' + formatType(call.returnType)
+	var vargStr = call.variadic ? ', ...' : '';
+	return newstr + tparams + '(' + call.parameters.map(formatParameter).join(', ') + vargStr + ') => ' + formatType(call.returnType)
 }
 function formatParameter(param) {
 	return param.name + (param.optional ? '?' : '') + ':' + formatType(param.type)
@@ -2537,7 +2538,7 @@ function Analyzer() {
 					break;
 				case 'WithStatement':
 					visitExp(node.object, NOT_VOID)
-					visitStmt(node.body) // TODO: flag use of `with` and don't report errors from this function
+					visitStmt(node.body) // XXX: flag use of `with` and don't report errors from this function
 					break;
 				case 'SwitchStatement':
 					visitExp(node.discriminant, NOT_VOID)
@@ -2763,7 +2764,7 @@ function Analyzer() {
 					    	assumeType(node, {type: 'number'})
 					    	break;
 
-					    case "+": // could be either number or string (TODO: handle this more precisely, maybe by unification?)
+					    case "+": // could be either number or string (XXX: handle this more precisely, maybe by unification?)
 					    	assumeType(node, {type: 'string'})
 					    	assumeType(node, {type: 'number'})
 					    	break;
@@ -2857,7 +2858,7 @@ function Analyzer() {
 					if (node.callee.type === 'MemberExpression') {
 						unify(call.this, node.callee.object)
 					} else {
-						assumeAny(call.this) // TODO: experiment with any vs unify with global object
+						assumeAny(call.this) // XXX: experiment with any vs unify with global object
 					}
 					for (var i=0; i<node.arguments.length; i++) {
 						visitExp(node.arguments[i])
@@ -3249,8 +3250,8 @@ function Analyzer() {
 					var applicable = true
 					sig.parameters.forEach(function(param, i) {
 						i = call.arguments.translateName(String(i))
-						if (!call.arguments.properties.has(i)) {
-							var optional = param.optional || (sig.variadic && i === sig.parameters.length-1) // last param of variadic functions is optional
+						if (!call.arguments.properties.has(i)) { // note: use == when comparing i to a number
+							var optional = param.optional || (sig.variadic && i == sig.parameters.length-1) // last param of variadic functions is optional
 							applicable &= optional
 							return
 						}
@@ -3297,7 +3298,7 @@ function Analyzer() {
 					ret.addType(substType(sig.returnType, tenv))
 
 					tcheck.getCallSigMatches().forEach(function(cmatch) {
-						// TODO: avoid calling stuff like array.map whenever I pass an array as argument
+						// XXX: avoid calling stuff like array.map whenever I pass an array as argument
 						var sig = substCall(cmatch.callsig, tenv)
 						sig = instantiateOpaqueSignature(sig)
 						resolveEntryCallLater(new EntryCallNode(cmatch.node, cmatch.receiver, sig))
