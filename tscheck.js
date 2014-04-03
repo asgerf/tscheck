@@ -853,7 +853,6 @@ function check(type, value, path, userPath, parentKey, tpath) {
 								}
 								checkCallSignature(call, value.key, objPrty.get.key, qualify(path,k))
 							}
-							// todo: getters and setters require static analysis
 						}
 					}
 				}
@@ -1170,7 +1169,7 @@ function printCoverage() {
 // 		Formatting types and values          
 // ------------------------------------------
 
-// TODO: restrict depth to avoid printing gigantic types
+// XXX: restrict depth to avoid printing gigantic types
 
 function formatTypeProperty(name,prty) {
 	return name + (prty.optional ? '?' : '') + ': ' + formatType(prty.type)
@@ -1602,7 +1601,8 @@ function Analyzer() {
 	var all_unodes = []
 	var unode_id = 0
 	function UNode() {
-		// all_unodes.push(this) // TODO: remove when not debuggin
+		// all_unodes.push(this) // for debugging
+		// this.origin = new Error().stack // for debugging
 
 		// union-find information
 		this.parent = this
@@ -1623,8 +1623,6 @@ function Analyzer() {
 		this._isObject = false
 		this._level = LEVEL_BOT
 		this._isFree = false
-
-		// this.origin = new Error().stack // FIXME: debugging only
 	}
 	UNode.prototype = {
 		get id() { return this.rep()._id },
@@ -2046,7 +2044,18 @@ function Analyzer() {
 				this.primitives.add({type: 'value', value: t.value})
 				break;
 			case 'enum':
-				this.makeAny(); // TODO: proper handling of enums
+				var vals = enum_values.get(t.name)
+				if (vals.length === 0) {
+					this.makeAny();
+				} else {
+					vals.forEach(function(v) {
+						if (v && typeof v === 'object') {
+							unifyLater(this, getConcreteObject(v.key))
+						} else {
+							self.primitives.add({type: 'value', value: v})
+						}
+					})
+				}
 				break;
 			default:
 				throw new Error("Unexpected type: " + t.type)
