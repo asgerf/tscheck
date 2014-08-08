@@ -3890,6 +3890,7 @@ function Analyzer() {
 		if (sig.new) {
 			call.this.isObject = true
 			call.this.prototypes.push(getConcreteObject(function_key).getPrty('prototype'))
+			unifyNow(call.this, call.return)
 			resolveInheritLater(call.this)
 		} else {
 			switch (receiver_key) {
