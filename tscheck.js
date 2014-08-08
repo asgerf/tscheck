@@ -151,7 +151,7 @@ function initialize() {
 	}
 
 	function convertUndefined(x) {
-		return x.isUndefined ? undefined : x;
+		return (x && x.isUndefined) ? undefined : x;
 	}
 	// Replaces all occurrences of {isUndefined:true} with undefined in the snapshot
 	function normalizeSnapshot() {
@@ -167,7 +167,8 @@ function initialize() {
 			if ('prototype' in obj) {
 				obj.prototype = convertUndefined(obj.prototype)
 			}
-			obj.properties.forEach(function(prty) {
+			for (var k in obj.properties) {
+				var prty = obj.properties[k]
 				if ('value' in prty) {
 					prty.value = convertUndefined(prty.value)
 				}
@@ -177,7 +178,7 @@ function initialize() {
 				if ('set' in prty) {
 					prty.set = convertUndefined(prty.set)
 				}
-			})
+			}
 		})
 	}
 
@@ -186,6 +187,7 @@ function initialize() {
 		var snapshotText = fs.readFileSync(snapshotFile, 'utf8');
 		try {
 			snapshot = JSON.parse(snapshotText);
+			normalizeSnapshot();
 		} catch (e) {
 			if (snapshotWasGenerated) {
 				console.error('Error while executing library code')
