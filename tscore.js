@@ -434,6 +434,14 @@ function parseClass(node, constructorType, host) {
         instanceType: instanceType
     }
 }
+function identifierName(id) {
+    var text = id.text();
+    if (text[0] === "'" || text[0] === '"') {
+        text = text.substring(1, text.length-1);
+        return TypeScript.Syntax.massageEscapes(text);
+    }
+    return text;
+}
 function parseInterface(node, host) {
 	current_node = node;
 	var qname = qualify(host, node.name.text());
@@ -461,7 +469,7 @@ function parseInterface(node, host) {
         else if (member instanceof TypeScript.VariableDeclarator) {
             var optional = TypeScript.hasFlag(member.id.getFlags(), TypeScript.ASTFlags.OptionalName)
             var t = member.typeExpr ? parseType(member.typeExpr) : TAny;
-            typ.setMember(member.id.text(), t, optional)
+            typ.setMember(identifierName(member.id), t, optional)
         }
         else {
             throw new TypeError("Unexpected member " + member.constructor.name + " in interface")
