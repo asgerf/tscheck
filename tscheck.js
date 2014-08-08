@@ -116,6 +116,7 @@ function onLoaded(fn) {
 
 var LIB_ORIGIN = ">lib.d.ts"; // pad origin with ">" to ensure it does not collide with user input
 
+
 var snapshot, typeDecl, sourceFileAst;
 function initialize() {
 	var sourceFile = getArgumentWithExtension('js')
@@ -147,6 +148,37 @@ function initialize() {
 			fatalError("Could not find " + snapshotFile)
 		}
 		loadInputs();
+	}
+
+	function convertUndefined(x) {
+		return x.isUndefined ? undefined : x;
+	}
+	// Replaces all occurrences of {isUndefined:true} with undefined in the snapshot
+	function normalizeSnapshot() {
+		snapshot.heap.forEach(function(obj) {
+			if (!obj) return;
+			if (obj.function && obj.function.type === 'BindFunc') {
+				obj.function.target = convertUndefined(obj.function.target)
+				obj.function.arguments = obj.function.arguments.map(convertUndefined)
+			}
+			if ('env' in obj) {
+				obj.env = convertUndefined(obj.env)
+			}
+			if ('prototype' in obj) {
+				obj.prototype = convertUndefined(obj.prototype)
+			}
+			obj.properties.forEach(function(prty) {
+				if ('value' in prty) {
+					prty.value = convertUndefined(prty.value)
+				}
+				if ('get' in prty) {
+					prty.get = convertUndefined(prty.get)
+				}
+				if ('set' in prty) {
+					prty.set = convertUndefined(prty.set)
+				}
+			})
+		})
 	}
 
 	function loadInputs(snapshotFile) {
