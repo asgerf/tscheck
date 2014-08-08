@@ -4,6 +4,8 @@ var fs = require('fs')
 var Map = require('./lib/map')
 require('sugar')
 var util = require('util')
+var path = require('path')
+
 
 function getLine(node) { // TODO: more robust way of getting line numbers
     var ast = inputs.find(function(x) {return x.file === current_file}).ast;
@@ -1409,6 +1411,40 @@ function outputPhase() {
 //      Public API
 // --------------------------------------------
 
+function findReferencedFiles(text) {
+    var regex = /^\s*\/\/\/\s*<reference\s+path\s*=\s*["']([^"']*)["']\s*\/>/mig;
+    var match;
+    var matches = [];
+    while ((match = regex.exec(text)) !== null) {
+        matches.push(match[1]);
+    }
+    return matches;
+}
+
+function includeReferencedFiles(inputs) {
+    var visited_files = Object.create(null)
+    var worklist = []
+    inputs.forEach(function(input) {
+        visited_files[input.file] = true
+        var dir = path.dirname(input.file)
+        findReferencedFiles(input.text).forEach(function(file) {
+            worklist.push(path.normalize(dir + '/' + file))
+        })
+    })
+    while (worklist.length > 0) {
+        var file = worklist.pop()
+        if (visited_files[file])
+            continue;
+        visited_files[file] = true
+        var text = fs.readFileSync(file, 'utf-8')
+        inputs.push({file: file, text: text})
+        var dir = path.dirname(file)
+        findReferencedFiles(text).forEach(function(file) {
+            worklist.push(path.normalize(dir + '/' + file))
+        })
+    }
+}
+
 module.exports = convert;
 var inputs;
 function convert(arg) {
@@ -1419,6 +1455,7 @@ function convert(arg) {
     } else {
         throw new Error("Illegal argument: " + util.inspect(arg))
     }
+    includeReferencedFiles(inputs);
     inputs = inputs.map(function(input) {
         return {
             file: input.file,
