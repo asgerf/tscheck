@@ -138,7 +138,8 @@ function TObject(qname, meta) {
     this.brand = null;
     this.meta = {
         kind: meta.kind,
-        origin: meta.origin
+        origin: meta.origin,
+        isEnum: false
     }
 }
 TObject.prototype.getModule = function(name) {
@@ -255,6 +256,7 @@ function addModuleMember(member, moduleObject, qname) {
     	var name = member.name.text()
     	if (member.isEnum()) { // enums are ModuleDeclarations in the AST, but they are semantically quite different
     		var enumObj = moduleObject.getModule(name)
+            enumObj.meta.isEnum = true
     		var enumResult = parseEnum(member, enumObj, qname)
     		moduleObject.types.push(name, enumResult.enum)
     	} else {

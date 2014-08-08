@@ -783,6 +783,21 @@ function reportError(msg, path, tpath) {
 	}
 }
 
+function isEmptyMap(obj) {
+	return Object.keys(obj).length === 0;
+}
+function treatAsOptionalMember(type, prtyName) {
+	var prty = type.properties[prtyName];
+	var t = prty.type;
+	if (prty.optional)
+		return true;
+	if (t.type === 'boolean' && type.meta.kind !== 'interface')
+		return true; // boolean property in context where it cannot be declared optional
+	if (t.type === 'object' && t.meta.isEnum && isEmptyMap(t.properties))
+		return true; // empty enum object
+	return false;
+}
+
 var tpath2values = new Map;
 var native_tpaths = new Map;
 var assumptions = {}
@@ -826,15 +841,8 @@ function check(type, value, path, userPath, parentKey, tpath) {
 					var isUserPath = userPath || isUserPrty;
 					var objPrty = obj.propertyMap.get(k) //findPrty(obj, k)
 					if (!objPrty) {
-						if (!typePrty.optional && isUserPath) {
-							var can_be_optional = type.meta.kind === 'interface'; // only interfaces can have optional members
-							if (typePrty.type.type === 'boolean' && !can_be_optional) {
-								// filter out warnings about absent boolean flags, where the flag cannot be declared optional
-							} else {
-								if (isUserPrty) { // there are too many non-portable properties in lib.d.ts
-									reportError("expected " + formatType(typePrty.type) + " but found nothing", qualify(path,k), qualify(tpath,k))
-								}
-							}
+						if (isUserPrty && !treatAsOptionalMember(type, k)) {
+							reportError("expected " + formatType(typePrty.type) + " but found nothing", qualify(path,k), qualify(tpath,k))
 						}
 					} else {
 						if ('value' in objPrty) {
