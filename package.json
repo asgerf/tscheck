@@ -11,7 +11,6 @@
   "files": ["lib", "tscheck.js", "tscore.js"],
   "bin": "tscheck.js",
 
-
   "description": "Find bugs in hand-written TypeScript type definitions.",
   "homepage": "http://github.com/asgerf/tscheck",
   "author": {

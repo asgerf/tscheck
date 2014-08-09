@@ -3023,8 +3023,10 @@ function Analyzer() {
 			// Resolve dynamic access
 			complete()
 			main_function.dynamic_accesses.forEach(function(dnode) {
-				// if (dnode.object.isAny)
-				// 	return // nothing to do
+				if (dnode.object.isAny) {
+					dnode.value.makeAny()
+					return
+				}
 				if (dnode.property.isAny) {
 					dnode.object.makeLevel(LEVEL_DICT)
 					unify(dnode.object.getPrty(0), dnode.value)
