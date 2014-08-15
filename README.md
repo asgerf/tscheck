@@ -48,11 +48,11 @@ Note that even for tiny `.d.ts` files, tscheck still has a warm-up time of a few
 Other Usage Notes
 -----------------
 
-If your `.d.ts` file depends on other files you must concatenate them yourself before feeding them to tscheck. Likewise, the JavaScript library must be compiled to a single `.js` file.
+The JavaScript library must be compiled to a single `.js` file; so try to get the unminified compiled version of the library you are using. If you are testing a plug-in you should concatenate it with the base library (and use the `--path` argument if possible, to only test the plug-in).
 
 Please run `tsc` on your `.d.ts` file before running tscheck. tscheck assumes that your `.d.ts` passes some well-formedness checks performed by the TypeScript compiler, and will react violently otherwise.
 
-tscheck will leave a `.jsnap` file next to your `.js` file. It contains a snapshot created with [jsnap](https://github.com/asgerf/jsnap). Feel free to delete it; tscheck will regenerate if necessary, although it speeds things up a bit if you leave it there.
+tscheck will leave a `.jsnap` file next to your `.js` file. It contains a snapshot created with [jsnap](https://github.com/asgerf/jsnap). Feel free to delete it; tscheck will regenerate it if necessary, although it speeds things up a bit if you leave it there.
 
 About **tscore**
 ============
