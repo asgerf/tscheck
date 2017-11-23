@@ -1,12 +1,12 @@
 {
   "name": "tscheck",
   "version": "0.1.4",
-  
+
   "dependencies": {
     "sugar": "",
     "commander": "",
     "esprima": "~1.0.4",
-    "jsnap": "0.1.2"
+    "jsnap": "~0.1.4"
   },
   "files": ["lib", "tscheck.js", "tscore.js"],
   "bin": "tscheck.js",
@@ -15,7 +15,7 @@
   "homepage": "http://github.com/asgerf/tscheck",
   "author": {
       "name": "Asger Feldthaus",
-      "email": "asf@cs.au.dk"
+      "email": "asger.feldthaus@gmail.com"
   },
   "repository" : {
     "type" : "git",
